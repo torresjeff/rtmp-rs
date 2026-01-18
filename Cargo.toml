@@ -1,0 +1,27 @@
+[package]
+name = "rtmp-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Production RTMP client/server library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/rtmp-rs"
+keywords = ["rtmp", "streaming", "video", "live"]
+categories = ["multimedia::video", "network-programming"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-test = "0.4"
+
+[[example]]
+name = "simple_server"
+path = "examples/simple_server.rs"
+
+[[example]]
+name = "puller"
+path = "examples/puller.rs"
