@@ -28,7 +28,6 @@
 
 use bytes::Bytes;
 
-use crate::error::{MediaError, Result};
 
 /// FLV tag type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

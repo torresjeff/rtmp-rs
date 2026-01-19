@@ -2,7 +2,6 @@
 //!
 //! High-level API for pulling streams from RTMP servers.
 
-use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use crate::error::Result;

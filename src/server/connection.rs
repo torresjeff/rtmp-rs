@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use tokio::time::timeout;
 
 use crate::amf::AmfValue;
 use crate::error::{Error, ProtocolError, Result};

@@ -4,7 +4,6 @@
 //! to handle connection events, authentication, and media data.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use std::collections::HashMap;
 
 use crate::amf::AmfValue;
