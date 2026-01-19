@@ -326,10 +326,13 @@ impl ChunkEncoder {
     /// Encode a message into chunks
     pub fn encode(&mut self, chunk: &RtmpChunk, buf: &mut BytesMut) {
         let csid = chunk.csid;
+        let chunk_size = self.chunk_size;
+
+        // Get or create state, and compute format based on current state
         let state = self.streams.entry(csid).or_default();
 
-        // Determine the header format to use
-        let fmt = self.select_format(chunk, state);
+        // Compute format based on state comparison
+        let fmt = select_format(chunk, state);
 
         // Determine if we need extended timestamp
         let needs_extended = chunk.timestamp >= EXTENDED_TIMESTAMP_THRESHOLD;
@@ -346,36 +349,46 @@ impl ChunkEncoder {
             timestamp_delta
         };
 
+        let had_extended_timestamp = state.has_extended_timestamp;
+
+        // Update state before encoding
+        state.timestamp = chunk.timestamp;
+        state.timestamp_delta = timestamp_delta;
+        state.message_length = chunk.payload.len() as u32;
+        state.message_type = chunk.message_type;
+        state.stream_id = chunk.stream_id;
+        state.has_extended_timestamp = needs_extended;
+
         // Encode chunks
         let mut offset = 0;
         let payload_len = chunk.payload.len();
         let mut first_chunk = true;
 
         while offset < payload_len {
-            let chunk_data_len = (payload_len - offset).min(self.chunk_size as usize);
+            let chunk_data_len = (payload_len - offset).min(chunk_size as usize);
 
             // Write basic header
-            self.write_basic_header(csid, if first_chunk { fmt } else { 3 }, buf);
+            write_basic_header(csid, if first_chunk { fmt } else { 3 }, buf);
 
             // Write message header based on format
             if first_chunk {
                 match fmt {
                     0 => {
                         // Full header
-                        self.write_u24(timestamp_field, buf);
-                        self.write_u24(payload_len as u32, buf);
+                        write_u24(timestamp_field, buf);
+                        write_u24(payload_len as u32, buf);
                         buf.put_u8(chunk.message_type);
                         buf.put_u32_le(chunk.stream_id);
                     }
                     1 => {
                         // No stream ID
-                        self.write_u24(delta_field, buf);
-                        self.write_u24(payload_len as u32, buf);
+                        write_u24(delta_field, buf);
+                        write_u24(payload_len as u32, buf);
                         buf.put_u8(chunk.message_type);
                     }
                     2 => {
                         // Timestamp delta only
-                        self.write_u24(delta_field, buf);
+                        write_u24(delta_field, buf);
                     }
                     3 => {
                         // No header
@@ -385,7 +398,7 @@ impl ChunkEncoder {
             }
 
             // Write extended timestamp if needed
-            if needs_extended && (first_chunk || state.has_extended_timestamp) {
+            if needs_extended && (first_chunk || had_extended_timestamp) {
                 buf.put_u32(chunk.timestamp);
             }
 
@@ -394,69 +407,62 @@ impl ChunkEncoder {
             offset += chunk_data_len;
             first_chunk = false;
         }
-
-        // Update state
-        state.timestamp = chunk.timestamp;
-        state.timestamp_delta = timestamp_delta;
-        state.message_length = payload_len as u32;
-        state.message_type = chunk.message_type;
-        state.stream_id = chunk.stream_id;
-        state.has_extended_timestamp = needs_extended;
     }
 
-    /// Select the best header format for compression
-    fn select_format(&self, chunk: &RtmpChunk, state: &ChunkStreamState) -> u8 {
-        // First message on this stream must use format 0
-        if state.message_type == 0 && state.stream_id == 0 {
-            return 0;
-        }
+}
 
-        // If stream ID differs, must use format 0
-        if chunk.stream_id != state.stream_id {
-            return 0;
-        }
-
-        // If message type or length differs, use format 1
-        if chunk.message_type != state.message_type
-            || chunk.payload.len() as u32 != state.message_length
-        {
-            return 1;
-        }
-
-        // If timestamp delta matches previous, use format 3
-        let delta = chunk.timestamp.wrapping_sub(state.timestamp);
-        if delta == state.timestamp_delta {
-            return 3;
-        }
-
-        // Otherwise use format 2 (timestamp delta only)
-        2
+/// Select the best header format for compression
+fn select_format(chunk: &RtmpChunk, state: &ChunkStreamState) -> u8 {
+    // First message on this stream must use format 0
+    if state.message_type == 0 && state.stream_id == 0 {
+        return 0;
     }
 
-    /// Write basic header
-    fn write_basic_header(&self, csid: u32, fmt: u8, buf: &mut BytesMut) {
-        if csid >= 64 + 256 {
-            // 3-byte header
-            buf.put_u8((fmt << 6) | 1);
-            let csid_offset = csid - 64;
-            buf.put_u8((csid_offset & 0xFF) as u8);
-            buf.put_u8(((csid_offset >> 8) & 0xFF) as u8);
-        } else if csid >= 64 {
-            // 2-byte header
-            buf.put_u8((fmt << 6) | 0);
-            buf.put_u8((csid - 64) as u8);
-        } else {
-            // 1-byte header
-            buf.put_u8((fmt << 6) | (csid as u8));
-        }
+    // If stream ID differs, must use format 0
+    if chunk.stream_id != state.stream_id {
+        return 0;
     }
 
-    /// Write 24-bit big-endian value
-    fn write_u24(&self, value: u32, buf: &mut BytesMut) {
-        buf.put_u8(((value >> 16) & 0xFF) as u8);
-        buf.put_u8(((value >> 8) & 0xFF) as u8);
-        buf.put_u8((value & 0xFF) as u8);
+    // If message type or length differs, use format 1
+    if chunk.message_type != state.message_type
+        || chunk.payload.len() as u32 != state.message_length
+    {
+        return 1;
     }
+
+    // If timestamp delta matches previous, use format 3
+    let delta = chunk.timestamp.wrapping_sub(state.timestamp);
+    if delta == state.timestamp_delta {
+        return 3;
+    }
+
+    // Otherwise use format 2 (timestamp delta only)
+    2
+}
+
+/// Write basic header
+fn write_basic_header(csid: u32, fmt: u8, buf: &mut BytesMut) {
+    if csid >= 64 + 256 {
+        // 3-byte header
+        buf.put_u8((fmt << 6) | 1);
+        let csid_offset = csid - 64;
+        buf.put_u8((csid_offset & 0xFF) as u8);
+        buf.put_u8(((csid_offset >> 8) & 0xFF) as u8);
+    } else if csid >= 64 {
+        // 2-byte header
+        buf.put_u8((fmt << 6) | 0);
+        buf.put_u8((csid - 64) as u8);
+    } else {
+        // 1-byte header
+        buf.put_u8((fmt << 6) | (csid as u8));
+    }
+}
+
+/// Write 24-bit big-endian value
+fn write_u24(value: u32, buf: &mut BytesMut) {
+    buf.put_u8(((value >> 16) & 0xFF) as u8);
+    buf.put_u8(((value >> 8) & 0xFF) as u8);
+    buf.put_u8((value & 0xFF) as u8);
 }
 
 impl Default for ChunkEncoder {

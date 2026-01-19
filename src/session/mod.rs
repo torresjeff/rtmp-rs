@@ -9,6 +9,6 @@ pub mod context;
 pub mod state;
 pub mod stream;
 
-pub use context::SessionContext;
+pub use context::{SessionContext, StreamContext};
 pub use state::SessionState;
 pub use stream::StreamState;
