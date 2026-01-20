@@ -14,7 +14,10 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::broadcast;
 use tokio::time::timeout;
+
+use crate::registry::{BroadcastFrame, FrameType, StreamKey, StreamRegistry};
 
 use crate::amf::AmfValue;
 use crate::error::{Error, ProtocolError, Result};
@@ -31,6 +34,15 @@ use crate::server::config::ServerConfig;
 use crate::server::handler::{AuthResult, MediaDeliveryMode, RtmpHandler};
 use crate::session::context::{SessionContext, StreamContext};
 use crate::session::state::SessionState;
+
+/// Subscriber state for backpressure handling
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriberState {
+    /// Normal operation
+    Normal,
+    /// Skipping frames until next keyframe (due to lag)
+    SkippingToKeyframe,
+}
 
 /// Per-connection handler
 pub struct Connection<H: RtmpHandler> {
@@ -60,8 +72,29 @@ pub struct Connection<H: RtmpHandler> {
     /// Application handler
     handler: Arc<H>,
 
+    /// Stream registry for pub/sub routing
+    registry: Arc<StreamRegistry>,
+
     /// Pending FC commands (stream key -> transaction ID)
     pending_fc: HashMap<String, f64>,
+
+    /// Stream key we are publishing to (if any)
+    publishing_to: Option<StreamKey>,
+
+    /// Stream key we are subscribed to (if any)
+    subscribed_to: Option<StreamKey>,
+
+    /// Broadcast receiver for subscriber mode
+    frame_rx: Option<broadcast::Receiver<BroadcastFrame>>,
+
+    /// Subscriber state for backpressure handling
+    subscriber_state: SubscriberState,
+
+    /// Count of consecutive lag events (for disconnection threshold)
+    consecutive_lag_count: u32,
+
+    /// RTMP stream ID we're using for playback (subscriber mode)
+    playback_stream_id: Option<u32>,
 }
 
 impl<H: RtmpHandler> Connection<H> {
@@ -72,6 +105,7 @@ impl<H: RtmpHandler> Connection<H> {
         peer_addr: SocketAddr,
         config: ServerConfig,
         handler: Arc<H>,
+        registry: Arc<StreamRegistry>,
     ) -> Self {
         let (read_half, write_half) = tokio::io::split(socket);
 
@@ -86,7 +120,14 @@ impl<H: RtmpHandler> Connection<H> {
             write_buf: BytesMut::with_capacity(config.write_buffer_size),
             config,
             handler,
+            registry,
             pending_fc: HashMap::new(),
+            publishing_to: None,
+            subscribed_to: None,
+            frame_rx: None,
+            subscriber_state: SubscriberState::Normal,
+            consecutive_lag_count: 0,
+            playback_stream_id: None,
         }
     }
 
@@ -107,23 +148,156 @@ impl<H: RtmpHandler> Connection<H> {
 
         // Main message loop
         let idle_timeout = self.config.idle_timeout;
-        loop {
-            match timeout(idle_timeout, self.read_and_process()).await {
-                Ok(Ok(true)) => continue,
-                Ok(Ok(false)) => break, // Clean disconnect
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "Processing error");
-                    break;
+        let result = loop {
+            // Use select! to handle both TCP input and broadcast frames
+            tokio::select! {
+                // Read from TCP (existing functionality)
+                result = timeout(idle_timeout, self.read_and_process()) => {
+                    match result {
+                        Ok(Ok(true)) => continue,
+                        Ok(Ok(false)) => break Ok(()), // Clean disconnect
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, "Processing error");
+                            break Err(e);
+                        }
+                        Err(_) => {
+                            tracing::debug!("Idle timeout");
+                            break Ok(());
+                        }
+                    }
                 }
-                Err(_) => {
-                    tracing::debug!("Idle timeout");
-                    break;
+
+                // Receive broadcast frames for subscribers
+                frame_result = async {
+                    match &mut self.frame_rx {
+                        Some(rx) => Some(rx.recv().await),
+                        None => {
+                            // No receiver, just sleep forever (never completes)
+                            std::future::pending::<Option<_>>().await
+                        }
+                    }
+                } => {
+                    if let Some(result) = frame_result {
+                        match result {
+                            Ok(frame) => {
+                                // Reset lag count on successful receive
+                                self.consecutive_lag_count = 0;
+                                if let Err(e) = self.send_broadcast_frame(frame).await {
+                                    tracing::debug!(error = %e, "Failed to send frame");
+                                    break Err(e);
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                if let Err(e) = self.handle_lag(n).await {
+                                    break Err(e);
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                // Publisher ended, notify subscriber
+                                if let Err(e) = self.handle_stream_ended().await {
+                                    tracing::debug!(error = %e, "Error handling stream end");
+                                }
+                                break Ok(());
+                            }
+                        }
+                    }
                 }
             }
-        }
+        };
+
+        // Cleanup: unregister publisher or unsubscribe
+        self.cleanup_on_disconnect().await;
 
         // Notify handler of disconnect
         self.handler.on_disconnect(&self.context).await;
+
+        result
+    }
+
+    /// Cleanup when connection disconnects
+    async fn cleanup_on_disconnect(&mut self) {
+        // Unregister as publisher if we were publishing
+        if let Some(ref key) = self.publishing_to {
+            self.registry.unregister_publisher(key, self.state.id).await;
+            tracing::debug!(
+                session_id = self.state.id,
+                stream = %key,
+                "Unregistered publisher on disconnect"
+            );
+        }
+
+        // Unsubscribe if we were subscribed
+        if let Some(ref key) = self.subscribed_to {
+            self.registry.unsubscribe(key).await;
+            tracing::debug!(
+                session_id = self.state.id,
+                stream = %key,
+                "Unsubscribed on disconnect"
+            );
+        }
+    }
+
+    /// Handle lag event from broadcast channel
+    async fn handle_lag(&mut self, skipped: u64) -> Result<()> {
+        let config = self.registry.config();
+
+        self.consecutive_lag_count += 1;
+
+        if skipped < config.lag_threshold_low {
+            // Minor lag, continue normally
+            tracing::debug!(
+                session_id = self.state.id,
+                skipped = skipped,
+                "Minor broadcast lag, continuing"
+            );
+            return Ok(());
+        }
+
+        // Significant lag - enter skip mode
+        if self.subscriber_state != SubscriberState::SkippingToKeyframe {
+            self.subscriber_state = SubscriberState::SkippingToKeyframe;
+            tracing::warn!(
+                session_id = self.state.id,
+                skipped = skipped,
+                "Subscriber lagging, skipping to next keyframe"
+            );
+        }
+
+        // Check if we should disconnect slow subscriber
+        if self.consecutive_lag_count >= config.max_consecutive_lag_events {
+            tracing::warn!(
+                session_id = self.state.id,
+                consecutive_lags = self.consecutive_lag_count,
+                "Disconnecting slow subscriber"
+            );
+            return Err(Error::Rejected("Subscriber too slow".into()));
+        }
+
+        Ok(())
+    }
+
+    /// Handle stream ended (publisher closed broadcast channel)
+    async fn handle_stream_ended(&mut self) -> Result<()> {
+        if let Some(stream_id) = self.playback_stream_id {
+            // Send StreamEOF
+            self.send_user_control(UserControlEvent::StreamEof(stream_id))
+                .await?;
+
+            // Send onStatus
+            let status = Command::on_status(
+                stream_id,
+                "status",
+                NS_PLAY_STOP,
+                "Stream ended",
+            );
+            self.send_command(CSID_COMMAND, stream_id, &status).await?;
+
+            tracing::info!(
+                session_id = self.state.id,
+                stream_id = stream_id,
+                "Stream ended, notified subscriber"
+            );
+        }
 
         Ok(())
     }
@@ -969,6 +1143,135 @@ impl<H: RtmpHandler> Connection<H> {
     async fn send_ping_response(&mut self, timestamp: u32) -> Result<()> {
         self.send_user_control(UserControlEvent::PingResponse(timestamp))
             .await
+    }
+
+    // === Media sending methods for subscriber mode ===
+
+    /// Send a video message to the client
+    async fn send_video(&mut self, stream_id: u32, timestamp: u32, data: Bytes) -> Result<()> {
+        let (msg_type, payload) = RtmpMessage::Video {
+            timestamp,
+            data: data.clone(),
+        }
+        .encode();
+
+        let chunk = RtmpChunk {
+            csid: CSID_VIDEO,
+            timestamp,
+            message_type: msg_type,
+            stream_id,
+            payload,
+        };
+
+        self.write_buf.clear();
+        self.chunk_encoder.encode(&chunk, &mut self.write_buf);
+        self.writer.write_all(&self.write_buf).await?;
+        // Don't flush after every frame - batch writes for efficiency
+        Ok(())
+    }
+
+    /// Send an audio message to the client
+    async fn send_audio(&mut self, stream_id: u32, timestamp: u32, data: Bytes) -> Result<()> {
+        let (msg_type, payload) = RtmpMessage::Audio {
+            timestamp,
+            data: data.clone(),
+        }
+        .encode();
+
+        let chunk = RtmpChunk {
+            csid: CSID_AUDIO,
+            timestamp,
+            message_type: msg_type,
+            stream_id,
+            payload,
+        };
+
+        self.write_buf.clear();
+        self.chunk_encoder.encode(&chunk, &mut self.write_buf);
+        self.writer.write_all(&self.write_buf).await?;
+        // Don't flush after every frame - batch writes for efficiency
+        Ok(())
+    }
+
+    /// Send a broadcast frame to the subscriber client
+    ///
+    /// Handles backpressure by skipping non-keyframes when in skip mode.
+    async fn send_broadcast_frame(&mut self, frame: BroadcastFrame) -> Result<()> {
+        let stream_id = self.playback_stream_id.unwrap_or(1);
+
+        // Backpressure handling: skip non-keyframes if we're lagging
+        if self.subscriber_state == SubscriberState::SkippingToKeyframe {
+            match frame.frame_type {
+                FrameType::Video => {
+                    if frame.is_keyframe || frame.is_header {
+                        // Got a keyframe or header, resume normal operation
+                        self.subscriber_state = SubscriberState::Normal;
+                        tracing::debug!(
+                            session_id = self.state.id,
+                            "Received keyframe, resuming normal playback"
+                        );
+                    } else {
+                        // Skip non-keyframe video
+                        return Ok(());
+                    }
+                }
+                FrameType::Audio => {
+                    // Always forward audio (glitches are worse than skipping audio)
+                    // Audio frames are small, so this doesn't add much load
+                }
+                FrameType::Metadata => {
+                    // Always forward metadata
+                }
+            }
+        }
+
+        // Send the frame based on type
+        match frame.frame_type {
+            FrameType::Video => {
+                self.send_video(stream_id, frame.timestamp, frame.data).await?;
+            }
+            FrameType::Audio => {
+                self.send_audio(stream_id, frame.timestamp, frame.data).await?;
+            }
+            FrameType::Metadata => {
+                // Send metadata as data message
+                self.send_metadata_frame(stream_id, frame.data).await?;
+            }
+        }
+
+        // Periodically flush to ensure data is sent
+        // The flush happens less frequently when sending many frames
+        self.writer.flush().await?;
+
+        Ok(())
+    }
+
+    /// Send metadata frame to subscriber
+    async fn send_metadata_frame(&mut self, stream_id: u32, data: Bytes) -> Result<()> {
+        // Metadata is sent as a data message with onMetaData
+        let data_msg = DataMessage {
+            name: CMD_ON_METADATA.to_string(),
+            values: vec![AmfValue::String("onMetaData".to_string())],
+            stream_id,
+        };
+
+        let (msg_type, payload) = RtmpMessage::Data(data_msg).encode();
+
+        // If the original data is available, use it directly
+        // Otherwise, encode the metadata
+        let chunk = RtmpChunk {
+            csid: CSID_COMMAND,
+            timestamp: 0,
+            message_type: msg_type,
+            stream_id,
+            payload: if data.is_empty() { payload } else { data },
+        };
+
+        self.write_buf.clear();
+        self.chunk_encoder.encode(&chunk, &mut self.write_buf);
+        self.writer.write_all(&self.write_buf).await?;
+
+        Ok(())
     }
 }
 
