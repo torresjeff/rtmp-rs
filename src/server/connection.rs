@@ -407,23 +407,35 @@ impl<H: RtmpHandler> Connection<H> {
             "read_and_process called"
         );
 
-        // First, try to decode any complete chunks already in buffer
-        // This handles data that arrived during handshake (e.g., connect command)
-        let mut processed = false;
-        while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
-            tracing::debug!(
-                session_id = self.state.id,
-                csid = chunk.csid,
-                msg_type = chunk.message_type,
-                "Decoded chunk from buffer"
-            );
-            self.handle_chunk(chunk).await?;
-            processed = true;
-        }
+        // Keep trying to decode until we need more data
+        // This is important for multi-chunk messages where multiple chunks
+        // may be in the buffer but only the last one completes the message
+        loop {
+            let buf_len_before = self.read_buf.len();
 
-        // If we processed something, return immediately (don't block waiting for more)
-        if processed {
-            return Ok(true);
+            // Try to decode a complete message
+            if let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
+                tracing::debug!(
+                    session_id = self.state.id,
+                    csid = chunk.csid,
+                    msg_type = chunk.message_type,
+                    "Decoded chunk from buffer"
+                );
+                self.handle_chunk(chunk).await?;
+                // Continue to try decoding more messages
+                continue;
+            }
+
+            // decode() returned None - check if it consumed any data
+            // If it did, there's a partial chunk being assembled, keep trying
+            let buf_len_after = self.read_buf.len();
+            if buf_len_after < buf_len_before {
+                // Some data was consumed (partial chunk), try again
+                continue;
+            }
+
+            // No progress - either buffer is empty or we need more data
+            break;
         }
 
         tracing::trace!(
@@ -432,7 +444,7 @@ impl<H: RtmpHandler> Connection<H> {
             "Waiting for more data"
         );
 
-        // No complete chunks in buffer - wait for more data
+        // Wait for more data from the socket
         let n = self.reader.read_buf(&mut self.read_buf).await?;
         if n == 0 {
             return Ok(false); // Connection closed
@@ -447,7 +459,7 @@ impl<H: RtmpHandler> Connection<H> {
 
         let needs_ack = self.state.add_bytes_received(n as u64);
 
-        // Try to decode chunks with the new data
+        // Process any complete messages with the new data
         while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
             tracing::debug!(
                 session_id = self.state.id,
