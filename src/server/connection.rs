@@ -751,6 +751,36 @@ impl<H: RtmpHandler> Connection<H> {
 
         match result {
             AuthResult::Accept => {
+                // Create stream key for registry
+                let app = self.context.app.clone().unwrap_or_default();
+                let registry_key = StreamKey::new(&app, &stream_name);
+
+                // Subscribe to the stream in registry
+                let (rx, catchup_frames) = match self.registry.subscribe(&registry_key).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::debug!(
+                            session_id = self.state.id,
+                            stream = %registry_key,
+                            error = %e,
+                            "Stream not found for play"
+                        );
+                        let status = Command::on_status(
+                            cmd.stream_id,
+                            "error",
+                            NS_PLAY_STREAM_NOT_FOUND,
+                            &format!("Stream not found: {}", stream_name),
+                        );
+                        self.send_command(CSID_COMMAND, cmd.stream_id, &status).await?;
+                        return Ok(());
+                    }
+                };
+
+                // Store subscription info
+                self.subscribed_to = Some(registry_key.clone());
+                self.frame_rx = Some(rx);
+                self.playback_stream_id = Some(cmd.stream_id);
+
                 if let Some(stream) = self.state.get_stream_mut(cmd.stream_id) {
                     stream.start_play(stream_name.clone());
                 }
@@ -780,6 +810,18 @@ impl<H: RtmpHandler> Connection<H> {
                 );
                 self.send_command(CSID_COMMAND, cmd.stream_id, &status)
                     .await?;
+
+                // Send catchup frames (sequence headers + GOP)
+                tracing::debug!(
+                    session_id = self.state.id,
+                    stream = %registry_key,
+                    catchup_frames = catchup_frames.len(),
+                    "Sending catchup frames"
+                );
+
+                for frame in catchup_frames {
+                    self.send_broadcast_frame(frame).await?;
+                }
 
                 tracing::info!(
                     session_id = self.state.id,
@@ -906,6 +948,12 @@ impl<H: RtmpHandler> Connection<H> {
             }
         }
 
+        // Broadcast to subscribers via registry
+        if let Some(ref key) = self.publishing_to {
+            let frame = BroadcastFrame::audio(timestamp, data, is_header);
+            self.registry.broadcast(key, frame).await;
+        }
+
         Ok(())
     }
 
@@ -965,6 +1013,12 @@ impl<H: RtmpHandler> Connection<H> {
                         .await;
                 }
             }
+        }
+
+        // Broadcast to subscribers via registry
+        if let Some(ref key) = self.publishing_to {
+            let frame = BroadcastFrame::video(timestamp, data, is_keyframe, is_header);
+            self.registry.broadcast(key, frame).await;
         }
 
         Ok(())
