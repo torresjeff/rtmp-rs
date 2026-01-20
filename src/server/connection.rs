@@ -375,7 +375,20 @@ impl<H: RtmpHandler> Connection<H> {
 
     /// Read data and process messages
     async fn read_and_process(&mut self) -> Result<bool> {
-        // Read more data
+        // First, try to decode any complete chunks already in buffer
+        // This handles data that arrived during handshake (e.g., connect command)
+        let mut processed = false;
+        while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
+            self.handle_chunk(chunk).await?;
+            processed = true;
+        }
+
+        // If we processed something, return immediately (don't block waiting for more)
+        if processed {
+            return Ok(true);
+        }
+
+        // No complete chunks in buffer - wait for more data
         let n = self.reader.read_buf(&mut self.read_buf).await?;
         if n == 0 {
             return Ok(false); // Connection closed
@@ -383,7 +396,7 @@ impl<H: RtmpHandler> Connection<H> {
 
         let needs_ack = self.state.add_bytes_received(n as u64);
 
-        // Try to decode chunks
+        // Try to decode chunks with the new data
         while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
             self.handle_chunk(chunk).await?;
         }
