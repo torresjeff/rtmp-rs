@@ -401,7 +401,7 @@ impl<H: RtmpHandler> Connection<H> {
 
     /// Read data and process messages
     async fn read_and_process(&mut self) -> Result<bool> {
-        tracing::trace!(
+        tracing::debug!(
             session_id = self.state.id,
             buf_len = self.read_buf.len(),
             "read_and_process called"
@@ -438,7 +438,7 @@ impl<H: RtmpHandler> Connection<H> {
             break;
         }
 
-        tracing::trace!(
+        tracing::debug!(
             session_id = self.state.id,
             buf_len = self.read_buf.len(),
             "Waiting for more data"
@@ -450,7 +450,7 @@ impl<H: RtmpHandler> Connection<H> {
             return Ok(false); // Connection closed
         }
 
-        tracing::trace!(
+        tracing::debug!(
             session_id = self.state.id,
             bytes_read = n,
             buf_len = self.read_buf.len(),
@@ -556,6 +556,14 @@ impl<H: RtmpHandler> Connection<H> {
 
     /// Handle command message
     async fn handle_command(&mut self, cmd: Command) -> Result<()> {
+        tracing::debug!(
+            session_id = self.state.id,
+            command = cmd.name,
+            transaction_id = cmd.transaction_id,
+            stream_id = cmd.stream_id,
+            args = ?cmd.arguments,
+            "Received command"
+        );
         match cmd.name.as_str() {
             CMD_CONNECT => self.handle_connect(cmd).await?,
             CMD_CREATE_STREAM => self.handle_create_stream(cmd).await?,

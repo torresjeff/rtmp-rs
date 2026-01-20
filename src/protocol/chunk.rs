@@ -109,7 +109,7 @@ impl ChunkDecoder {
             return Ok(None);
         }
 
-        // Parse basic header to get csid and fmt
+        // Parse basic header to get csid and fmt (peek only, don't advance)
         let (fmt, csid, header_len) = match self.parse_basic_header(buf)? {
             Some(v) => v,
             None => return Ok(None),
@@ -154,7 +154,41 @@ impl ChunkDecoder {
             return Ok(None); // Need more header data
         }
 
-        // Parse message header
+        // PEEK at message header to determine chunk data length BEFORE consuming anything
+        // For fmt 3, we use state values; for others, we peek at the buffer
+        let (_peeked_message_length, peeked_expected_length) = match fmt {
+            0 | 1 => {
+                // Message length is at offset: header_len + 3 (timestamp bytes)
+                let len_offset = header_len + 3;
+                let len_bytes = &buf[len_offset..len_offset + 3];
+                let len = ((len_bytes[0] as u32) << 16) | ((len_bytes[1] as u32) << 8) | (len_bytes[2] as u32);
+                (len, len)
+            }
+            2 | 3 => {
+                // Use state for message length
+                let msg_len = state.message_length;
+                let expected = if state.partial_message.is_empty() {
+                    msg_len
+                } else {
+                    state.expected_length
+                };
+                (msg_len, expected)
+            }
+            _ => unreachable!(),
+        };
+
+        // Calculate chunk data length
+        let partial_len = state.partial_message.len() as u32;
+        let remaining = peeked_expected_length.saturating_sub(partial_len);
+        let chunk_data_len = remaining.min(self.chunk_size) as usize;
+
+        // Now check if we have enough data for header + payload
+        let total_chunk_size = total_header_size + chunk_data_len;
+        if buf.len() < total_chunk_size {
+            return Ok(None); // Need more data - don't consume anything
+        }
+
+        // NOW we can safely consume the data since we have enough for the entire chunk
         buf.advance(header_len);
 
         let (timestamp_field, message_length, message_type, stream_id) = match fmt {
@@ -185,11 +219,8 @@ impl ChunkDecoder {
             _ => unreachable!(),
         };
 
-        // Handle extended timestamp
+        // Handle extended timestamp (we already checked we have enough bytes)
         let timestamp = if timestamp_field >= EXTENDED_TIMESTAMP_THRESHOLD || (fmt == 3 && state.has_extended_timestamp) {
-            if buf.len() < 4 {
-                return Ok(None);
-            }
             state.has_extended_timestamp = true;
             buf.get_u32()
         } else {
@@ -224,15 +255,7 @@ impl ChunkDecoder {
             state.partial_message.reserve(message_length as usize);
         }
 
-        // Calculate how much data to read for this chunk
-        let remaining = state.expected_length - state.partial_message.len() as u32;
-        let chunk_data_len = remaining.min(self.chunk_size) as usize;
-
-        if buf.len() < chunk_data_len {
-            return Ok(None); // Need more chunk data
-        }
-
-        // Read chunk data
+        // Read chunk data (we already verified we have enough)
         state.partial_message.put_slice(&buf[..chunk_data_len]);
         buf.advance(chunk_data_len);
 
