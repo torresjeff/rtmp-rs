@@ -47,6 +47,7 @@ pub struct Handshake {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // States are useful documentation, some used only in complex handshake
 enum HandshakeState {
     /// Initial state - need to send C0C1/S0S1
     Initial,

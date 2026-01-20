@@ -154,7 +154,7 @@ impl RtmpHandler for MyHandler {
         }
     }
 
-    async fn on_keyframe(&self, ctx: &StreamContext, timestamp: u32) {
+    async fn on_keyframe(&self, ctx: &StreamContext, _timestamp: u32) {
         self.keyframes.fetch_add(1, Ordering::Relaxed);
 
         // Print stats every keyframe (usually every 2 seconds)
@@ -184,7 +184,7 @@ impl RtmpHandler for MyHandler {
     }
 
     fn media_delivery_mode(&self) -> MediaDeliveryMode {
-        MediaDeliveryMode::Both
+        MediaDeliveryMode::RawFlv
     }
 }
 
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run with Ctrl+C handling
     let server = Arc::new(server);
-    let server_clone = Arc::clone(&server);
+    let _server_clone = Arc::clone(&server);
 
     tokio::select! {
         result = server.run() => {

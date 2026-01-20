@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_large_message_chunking() {
-        let large_payload = vec![0u8; 500]; // Larger than default chunk size
+        let large_payload = vec![0u8; 500]; // Larger than default chunk size (128)
 
         let original = RtmpChunk {
             csid: CSID_VIDEO,
@@ -538,10 +538,15 @@ mod tests {
         let mut encoded = BytesMut::new();
         encoder.encode(&original, &mut encoded);
 
-        // Should produce multiple chunks
+        // Should produce multiple chunks (500 bytes / 128 = ~4 chunks)
         assert!(encoded.len() > 500);
 
-        let decoded = decoder.decode(&mut encoded).unwrap().unwrap();
+        // Decode all chunks until we get a complete message
+        let decoded = loop {
+            if let Some(chunk) = decoder.decode(&mut encoded).unwrap() {
+                break chunk;
+            }
+        };
         assert_eq!(decoded.payload.len(), 500);
     }
 }

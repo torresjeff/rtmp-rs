@@ -268,13 +268,16 @@ mod tests {
         let mut normalizer = TimestampNormalizer::new();
 
         assert_eq!(normalizer.normalize(0), 0);
-        assert_eq!(normalizer.normalize(100), 100);
-        assert_eq!(normalizer.normalize(200), 200);
+        assert_eq!(normalizer.normalize(1000), 1000);
+        assert_eq!(normalizer.normalize(2000), 2000);
 
-        // Small regression (within 1 second) - allow it
-        assert_eq!(normalizer.normalize(150), 150);
+        // Small regression (within 1 second) - allow it (no offset adjustment)
+        assert_eq!(normalizer.normalize(1500), 1500);
 
-        // Large regression - adjust offset
-        assert_eq!(normalizer.normalize(50), 251); // 50 + (200+1)
+        // Large regression (> 1 second) - adjust offset
+        // last_timestamp is now 1500, regression to 100 is 1400ms > 1000ms
+        // So offset becomes 1500 + 1 = 1501
+        // Result = 100 + 1501 = 1601
+        assert_eq!(normalizer.normalize(100), 1601);
     }
 }

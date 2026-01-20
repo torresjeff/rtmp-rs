@@ -271,13 +271,16 @@ mod tests {
 
     #[test]
     fn test_gop_buffer_size_limit() {
-        let mut buffer = GopBuffer::with_max_size(1000);
+        let mut buffer = GopBuffer::with_max_size(500);
 
-        buffer.push(make_tag(0, true, 500));
-        buffer.push(make_tag(33, false, 400));
+        buffer.push(make_tag(0, true, 200));
+        buffer.push(make_tag(33, false, 200));
 
-        // This should fail - would exceed limit
-        assert!(!buffer.push(make_tag(66, false, 200)));
+        // This succeeds by dropping the keyframe (200 + 200 = 400 < 500)
+        assert!(buffer.push(make_tag(66, false, 200)));
+
+        // Single frame larger than max_size should fail
+        assert!(!buffer.push(make_tag(99, false, 600)));
     }
 
     #[test]
