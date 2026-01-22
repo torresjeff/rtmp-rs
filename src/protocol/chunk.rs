@@ -141,7 +141,8 @@ impl ChunkDecoder {
         } else if buf.len() > header_len + 2 {
             // Peek at timestamp field to check for extended timestamp
             let ts_bytes = &buf[header_len..header_len + 3];
-            let ts = ((ts_bytes[0] as u32) << 16) | ((ts_bytes[1] as u32) << 8) | (ts_bytes[2] as u32);
+            let ts =
+                ((ts_bytes[0] as u32) << 16) | ((ts_bytes[1] as u32) << 8) | (ts_bytes[2] as u32);
             ts >= EXTENDED_TIMESTAMP_THRESHOLD
         } else {
             false
@@ -161,7 +162,9 @@ impl ChunkDecoder {
                 // Message length is at offset: header_len + 3 (timestamp bytes)
                 let len_offset = header_len + 3;
                 let len_bytes = &buf[len_offset..len_offset + 3];
-                let len = ((len_bytes[0] as u32) << 16) | ((len_bytes[1] as u32) << 8) | (len_bytes[2] as u32);
+                let len = ((len_bytes[0] as u32) << 16)
+                    | ((len_bytes[1] as u32) << 8)
+                    | (len_bytes[2] as u32);
                 (len, len)
             }
             2 | 3 => {
@@ -210,17 +213,29 @@ impl ChunkDecoder {
             2 => {
                 // Timestamp delta only
                 let ts = buf.get_uint(3) as u32;
-                (ts, state.message_length, state.message_type, state.stream_id)
+                (
+                    ts,
+                    state.message_length,
+                    state.message_type,
+                    state.stream_id,
+                )
             }
             3 => {
                 // No header, use previous values
-                (state.timestamp_delta, state.message_length, state.message_type, state.stream_id)
+                (
+                    state.timestamp_delta,
+                    state.message_length,
+                    state.message_type,
+                    state.stream_id,
+                )
             }
             _ => unreachable!(),
         };
 
         // Handle extended timestamp (we already checked we have enough bytes)
-        let timestamp = if timestamp_field >= EXTENDED_TIMESTAMP_THRESHOLD || (fmt == 3 && state.has_extended_timestamp) {
+        let timestamp = if timestamp_field >= EXTENDED_TIMESTAMP_THRESHOLD
+            || (fmt == 3 && state.has_extended_timestamp)
+        {
             state.has_extended_timestamp = true;
             buf.get_u32()
         } else {
@@ -231,6 +246,9 @@ impl ChunkDecoder {
         // Update state
         let absolute_timestamp = if fmt == 0 {
             timestamp
+        } else if fmt == 3 && !state.partial_message.is_empty() {
+            // continuation chunk, timestamp stays the same
+            state.timestamp
         } else {
             state.timestamp.wrapping_add(timestamp)
         };
@@ -246,7 +264,8 @@ impl ChunkDecoder {
             return Err(ProtocolError::MessageTooLarge {
                 size: message_length,
                 max: self.max_message_size,
-            }.into());
+            }
+            .into());
         }
 
         // Initialize reassembly buffer if this is a new message
@@ -439,7 +458,6 @@ impl ChunkEncoder {
             first_chunk = false;
         }
     }
-
 }
 
 /// Select the best header format for compression

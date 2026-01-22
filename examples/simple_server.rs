@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rtmp_rs::amf::AmfValue;
-use rtmp_rs::media::{FlvTag, H264Data, AacData};
+use rtmp_rs::media::{AacData, FlvTag, H264Data};
 use rtmp_rs::protocol::message::{ConnectParams, PublishParams};
 use rtmp_rs::server::handler::{AuthResult, MediaDeliveryMode, RtmpHandler};
 use rtmp_rs::session::{SessionContext, StreamContext};
@@ -76,9 +76,7 @@ impl RtmpHandler for MyHandler {
     async fn on_connect(&self, ctx: &SessionContext, params: &ConnectParams) -> AuthResult {
         println!(
             "[{}] Connect: app={}, tcUrl={:?}",
-            ctx.session_id,
-            params.app,
-            params.tc_url
+            ctx.session_id, params.app, params.tc_url
         );
 
         // Accept any app name
@@ -130,42 +128,53 @@ impl RtmpHandler for MyHandler {
         }
     }
 
-    async fn on_media_tag(&self, _ctx: &StreamContext, tag: &FlvTag) -> bool {
+    async fn on_media_tag(&self, ctx: &StreamContext, tag: &FlvTag) -> bool {
         self.bytes_received
             .fetch_add(tag.size() as u64, Ordering::Relaxed);
+        tracing::trace!(
+            stream_id = ctx.stream_id,
+            is_publishing = ctx.is_publishing,
+            tag_type = ?tag.tag_type,
+            timestamp = tag.timestamp,
+            "Server received flv tag",
+        );
         true
     }
 
-    async fn on_video_frame(&self, _ctx: &StreamContext, frame: &H264Data, timestamp: u32) {
+    async fn on_video_frame(&self, ctx: &StreamContext, frame: &H264Data, timestamp: u32) {
         self.video_frames.fetch_add(1, Ordering::Relaxed);
 
         match frame {
             H264Data::SequenceHeader(config) => {
-                println!(
-                    "  Video sequence header: {} Level {} ({} SPS, {} PPS)",
-                    config.profile_name(),
-                    config.level_string(),
-                    config.sps.len(),
-                    config.pps.len()
+                tracing::debug!(
+                    profile_name = config.profile_name(),
+                    level = config.level_string(),
+                    sps = config.sps.len(),
+                    pps = config.pps.len(),
+                    stream_id = ctx.stream_id,
+                    is_publishing = ctx.is_publishing,
+                    "  Video sequence header",
                 );
             }
             H264Data::Frame { keyframe, .. } if *keyframe => {
                 // Only log keyframes to avoid spam
-                println!("  Keyframe at timestamp {}", timestamp);
+                tracing::trace!(timestamp = timestamp, "Server received video key frame");
             }
             _ => {}
         }
     }
 
-    async fn on_audio_frame(&self, _ctx: &StreamContext, frame: &AacData, _timestamp: u32) {
+    async fn on_audio_frame(&self, ctx: &StreamContext, frame: &AacData, _timestamp: u32) {
         self.audio_frames.fetch_add(1, Ordering::Relaxed);
 
         if let AacData::SequenceHeader(config) = frame {
-            println!(
-                "  Audio sequence header: {:?} {}Hz {}ch",
-                config.profile(),
-                config.sampling_frequency,
-                config.channels()
+            tracing::debug!(
+                profile = ?config.profile(),
+                sampling_frequency = config.sampling_frequency,
+                channels = config.channels(),
+                stream_id = ctx.stream_id,
+                is_publishing = ctx.is_publishing,
+                "  Audio sequence header"
             );
         }
     }
@@ -176,7 +185,7 @@ impl RtmpHandler for MyHandler {
         // Print stats every keyframe (usually every 2 seconds)
         let total_keyframes = self.keyframes.load(Ordering::Relaxed);
         if total_keyframes % 5 == 0 {
-            println!(
+            tracing::debug!(
                 "[{}] Stream '{}' progress: {} keyframes, {} video, {} audio frames",
                 ctx.session.session_id,
                 ctx.stream_key,
@@ -200,7 +209,7 @@ impl RtmpHandler for MyHandler {
     }
 
     fn media_delivery_mode(&self) -> MediaDeliveryMode {
-        MediaDeliveryMode::RawFlv
+        MediaDeliveryMode::ParsedFrames
     }
 }
 
@@ -211,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("rtmp_rs=debug".parse()?)
-                .add_directive("simple_server=info".parse()?),
+                .add_directive("simple_server=debug".parse()?),
         )
         .init();
 

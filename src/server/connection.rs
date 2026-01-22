@@ -84,6 +84,10 @@ pub struct Connection<H: RtmpHandler> {
     /// Stream key we are subscribed to (if any)
     subscribed_to: Option<StreamKey>,
 
+    last_audio_ts: Option<u32>,
+
+    last_video_ts: Option<u32>,
+
     /// Broadcast receiver for subscriber mode
     frame_rx: Option<broadcast::Receiver<BroadcastFrame>>,
 
@@ -124,6 +128,8 @@ impl<H: RtmpHandler> Connection<H> {
             pending_fc: HashMap::new(),
             publishing_to: None,
             subscribed_to: None,
+            last_audio_ts: None,
+            last_video_ts: None,
             frame_rx: None,
             subscriber_state: SubscriberState::Normal,
             consecutive_lag_count: 0,
@@ -143,7 +149,11 @@ impl<H: RtmpHandler> Connection<H> {
         self.handler.on_handshake_complete(&self.context).await;
 
         // Set our chunk size
-        tracing::debug!(session_id = self.state.id, chunk_size = self.config.chunk_size, "Sending set chunk size");
+        tracing::debug!(
+            session_id = self.state.id,
+            chunk_size = self.config.chunk_size,
+            "Sending set chunk size"
+        );
         self.send_set_chunk_size(self.config.chunk_size).await?;
         self.chunk_encoder.set_chunk_size(self.config.chunk_size);
 
@@ -309,12 +319,7 @@ impl<H: RtmpHandler> Connection<H> {
                 .await?;
 
             // Send onStatus
-            let status = Command::on_status(
-                stream_id,
-                "status",
-                NS_PLAY_STOP,
-                "Stream ended",
-            );
+            let status = Command::on_status(stream_id, "status", NS_PLAY_STOP, "Stream ended");
             self.send_command(CSID_COMMAND, stream_id, &status).await?;
 
             tracing::info!(
@@ -401,7 +406,7 @@ impl<H: RtmpHandler> Connection<H> {
 
     /// Read data and process messages
     async fn read_and_process(&mut self) -> Result<bool> {
-        tracing::debug!(
+        tracing::trace!(
             session_id = self.state.id,
             buf_len = self.read_buf.len(),
             "read_and_process called"
@@ -415,7 +420,7 @@ impl<H: RtmpHandler> Connection<H> {
 
             // Try to decode a complete message
             if let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
-                tracing::debug!(
+                tracing::trace!(
                     session_id = self.state.id,
                     csid = chunk.csid,
                     msg_type = chunk.message_type,
@@ -438,7 +443,7 @@ impl<H: RtmpHandler> Connection<H> {
             break;
         }
 
-        tracing::debug!(
+        tracing::trace!(
             session_id = self.state.id,
             buf_len = self.read_buf.len(),
             "Waiting for more data"
@@ -450,7 +455,7 @@ impl<H: RtmpHandler> Connection<H> {
             return Ok(false); // Connection closed
         }
 
-        tracing::debug!(
+        tracing::trace!(
             session_id = self.state.id,
             bytes_read = n,
             buf_len = self.read_buf.len(),
@@ -461,7 +466,7 @@ impl<H: RtmpHandler> Connection<H> {
 
         // Process any complete messages with the new data
         while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
-            tracing::debug!(
+            tracing::trace!(
                 session_id = self.state.id,
                 csid = chunk.csid,
                 msg_type = chunk.message_type,
@@ -575,7 +580,7 @@ impl<H: RtmpHandler> Connection<H> {
             CMD_RELEASE_STREAM => self.handle_release_stream(cmd).await?,
             CMD_CLOSE | "closeStream" => self.handle_close_stream(cmd).await?,
             _ => {
-                tracing::trace!(command = cmd.name, "Unknown command");
+                tracing::debug!(command = cmd.name, "Unknown command");
             }
         }
         Ok(())
@@ -764,7 +769,11 @@ impl<H: RtmpHandler> Connection<H> {
                 let registry_key = StreamKey::new(&app, &stream_key);
 
                 // Register as publisher in the registry
-                if let Err(e) = self.registry.register_publisher(&registry_key, self.state.id).await {
+                if let Err(e) = self
+                    .registry
+                    .register_publisher(&registry_key, self.state.id)
+                    .await
+                {
                     tracing::warn!(
                         session_id = self.state.id,
                         stream = %registry_key,
@@ -777,7 +786,8 @@ impl<H: RtmpHandler> Connection<H> {
                         NS_PUBLISH_BAD_NAME,
                         &format!("Stream already publishing: {}", e),
                     );
-                    self.send_command(CSID_COMMAND, cmd.stream_id, &status).await?;
+                    self.send_command(CSID_COMMAND, cmd.stream_id, &status)
+                        .await?;
                     return Err(Error::Rejected(format!("Stream already publishing: {}", e)));
                 }
 
@@ -883,7 +893,8 @@ impl<H: RtmpHandler> Connection<H> {
                             NS_PLAY_STREAM_NOT_FOUND,
                             &format!("Stream not found: {}", stream_name),
                         );
-                        self.send_command(CSID_COMMAND, cmd.stream_id, &status).await?;
+                        self.send_command(CSID_COMMAND, cmd.stream_id, &status)
+                            .await?;
                         return Ok(());
                     }
                 };
@@ -1018,6 +1029,17 @@ impl<H: RtmpHandler> Connection<H> {
             return Ok(());
         }
 
+        if let Some(prev_audio_ts) = self.last_audio_ts {
+            let timestamp_delta = timestamp - prev_audio_ts;
+            tracing::trace!(
+                timestamp = timestamp,
+                last_audio_ts = prev_audio_ts,
+                timestamp_delta = timestamp_delta,
+                "connection handle_audio"
+            );
+        }
+        self.last_audio_ts = Some(timestamp);
+
         // Find publishing stream
         let stream_id = self.find_publishing_stream()?;
         let stream = self
@@ -1074,6 +1096,17 @@ impl<H: RtmpHandler> Connection<H> {
         if data.is_empty() {
             return Ok(());
         }
+
+        if let Some(prev_video_ts) = self.last_video_ts {
+            let timestamp_delta = timestamp - prev_video_ts;
+            tracing::trace!(
+                timestamp = timestamp,
+                last_video_ts = prev_video_ts,
+                timestamp_delta = timestamp_delta,
+                "connection handle_video"
+            );
+        }
+        self.last_video_ts = Some(timestamp);
 
         // Find publishing stream
         let stream_id = self.find_publishing_stream()?;
@@ -1419,10 +1452,12 @@ impl<H: RtmpHandler> Connection<H> {
         // Send the frame based on type
         match frame.frame_type {
             FrameType::Video => {
-                self.send_video(stream_id, frame.timestamp, frame.data).await?;
+                self.send_video(stream_id, frame.timestamp, frame.data)
+                    .await?;
             }
             FrameType::Audio => {
-                self.send_audio(stream_id, frame.timestamp, frame.data).await?;
+                self.send_audio(stream_id, frame.timestamp, frame.data)
+                    .await?;
             }
             FrameType::Metadata => {
                 // Send metadata as data message
