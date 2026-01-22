@@ -99,6 +99,16 @@ pub struct Connection<H: RtmpHandler> {
 
     /// RTMP stream ID we're using for playback (subscriber mode)
     playback_stream_id: Option<u32>,
+
+    /// Whether the subscriber is paused
+    is_paused: bool,
+
+    /// Frames dropped while paused (for logging)
+    frames_dropped_while_paused: u64,
+
+    /// Skip audio until keyframe (set on unpause, cleared on keyframe)
+    /// This prevents the jarring experience of audio playing while video is frozen
+    skip_audio_until_keyframe: bool,
 }
 
 impl<H: RtmpHandler> Connection<H> {
@@ -134,6 +144,9 @@ impl<H: RtmpHandler> Connection<H> {
             subscriber_state: SubscriberState::Normal,
             consecutive_lag_count: 0,
             playback_stream_id: None,
+            is_paused: false,
+            frames_dropped_while_paused: 0,
+            skip_audio_until_keyframe: false,
         }
     }
 
@@ -313,6 +326,11 @@ impl<H: RtmpHandler> Connection<H> {
 
     /// Handle stream ended (publisher closed broadcast channel)
     async fn handle_stream_ended(&mut self) -> Result<()> {
+        // Reset pause state on stream end
+        if self.is_paused {
+            self.is_paused = false;
+        }
+
         if let Some(stream_id) = self.playback_stream_id {
             // Send StreamEOF
             self.send_user_control(UserControlEvent::StreamEof(stream_id))
@@ -578,6 +596,7 @@ impl<H: RtmpHandler> Connection<H> {
             CMD_FC_PUBLISH => self.handle_fc_publish(cmd).await?,
             CMD_FC_UNPUBLISH => self.handle_fc_unpublish(cmd).await?,
             CMD_RELEASE_STREAM => self.handle_release_stream(cmd).await?,
+            CMD_PAUSE => self.handle_pause(cmd).await?,
             CMD_CLOSE | "closeStream" => self.handle_close_stream(cmd).await?,
             _ => {
                 tracing::debug!(command = cmd.name, "Unknown command");
@@ -971,6 +990,124 @@ impl<H: RtmpHandler> Connection<H> {
         if let Some(stream) = self.state.get_stream_mut(cmd.stream_id) {
             stream.stop();
         }
+        Ok(())
+    }
+
+    /// Handle pause command from subscriber
+    async fn handle_pause(&mut self, cmd: Command) -> Result<()> {
+        let stream_id = match self.playback_stream_id {
+            Some(id) => id,
+            None => return Ok(()), // Not in play mode
+        };
+
+        // The pause flag is the first argument (true = pause, false = unpause)
+        let pause_flag = cmd
+            .arguments
+            .first()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        if pause_flag {
+            self.do_pause(stream_id).await
+        } else {
+            self.do_unpause(stream_id).await
+        }
+    }
+
+    /// Pause playback for subscriber
+    async fn do_pause(&mut self, stream_id: u32) -> Result<()> {
+        if self.is_paused {
+            return Ok(()); // Already paused
+        }
+
+        self.is_paused = true;
+        self.frames_dropped_while_paused = 0;
+
+        // Send onStatus(NetStream.Pause.Notify)
+        let status = Command::on_status(stream_id, "status", NS_PAUSE_NOTIFY, "Playback paused");
+        self.send_command(CSID_COMMAND, stream_id, &status).await?;
+
+        // Send StreamDry to indicate no data coming
+        self.send_user_control(UserControlEvent::StreamDry(stream_id))
+            .await?;
+
+        // Notify handler
+        let stream_key = self
+            .subscribed_to
+            .as_ref()
+            .map(|k| k.name.clone())
+            .unwrap_or_default();
+        let stream_ctx =
+            StreamContext::new(self.context.clone(), stream_id, stream_key, false);
+        self.handler.on_pause(&stream_ctx).await;
+
+        tracing::info!(session_id = self.state.id, "Subscriber paused");
+        Ok(())
+    }
+
+    /// Unpause playback for subscriber
+    async fn do_unpause(&mut self, stream_id: u32) -> Result<()> {
+        if !self.is_paused {
+            return Ok(()); // Not paused
+        }
+
+        self.is_paused = false;
+
+        // Force keyframe sync for clean video resumption
+        // Also skip audio to avoid hearing audio while video is frozen
+        self.subscriber_state = SubscriberState::SkippingToKeyframe;
+        self.skip_audio_until_keyframe = true;
+
+        // Send onStatus(NetStream.Unpause.Notify)
+        let status =
+            Command::on_status(stream_id, "status", NS_UNPAUSE_NOTIFY, "Playback resumed");
+        self.send_command(CSID_COMMAND, stream_id, &status).await?;
+
+        // Send StreamBegin to indicate data resuming
+        self.send_user_control(UserControlEvent::StreamBegin(stream_id))
+            .await?;
+
+        // Resend sequence headers to reinitialize decoder
+        // This is critical for clean playback resumption
+        if let Some(ref key) = self.subscribed_to {
+            let headers = self.registry.get_sequence_headers(key).await;
+            tracing::debug!(
+                session_id = self.state.id,
+                header_count = headers.len(),
+                "Resending sequence headers after unpause"
+            );
+            for frame in headers {
+                match frame.frame_type {
+                    FrameType::Video => {
+                        self.send_video(stream_id, frame.timestamp, frame.data)
+                            .await?;
+                    }
+                    FrameType::Audio => {
+                        self.send_audio(stream_id, frame.timestamp, frame.data)
+                            .await?;
+                    }
+                    _ => {}
+                }
+            }
+            self.writer.flush().await?;
+        }
+
+        // Notify handler
+        let stream_key = self
+            .subscribed_to
+            .as_ref()
+            .map(|k| k.name.clone())
+            .unwrap_or_default();
+        let stream_ctx =
+            StreamContext::new(self.context.clone(), stream_id, stream_key, false);
+        self.handler.on_unpause(&stream_ctx).await;
+
+        tracing::info!(
+            session_id = self.state.id,
+            frames_dropped = self.frames_dropped_while_paused,
+            "Subscriber unpaused (waiting for keyframe)"
+        );
+        self.frames_dropped_while_paused = 0;
         Ok(())
     }
 
@@ -1420,8 +1557,16 @@ impl<H: RtmpHandler> Connection<H> {
     /// Send a broadcast frame to the subscriber client
     ///
     /// Handles backpressure by skipping non-keyframes when in skip mode.
+    /// Also handles pause state by consuming frames without sending.
     async fn send_broadcast_frame(&mut self, frame: BroadcastFrame) -> Result<()> {
         let stream_id = self.playback_stream_id.unwrap_or(1);
+
+        // PAUSE: Consume frame but don't send
+        if self.is_paused {
+            self.frames_dropped_while_paused += 1;
+            tracing::trace!(session_id = self.state.id, "Frame dropped (paused)");
+            return Ok(());
+        }
 
         // Backpressure handling: skip non-keyframes if we're lagging
         if self.subscriber_state == SubscriberState::SkippingToKeyframe {
@@ -1430,6 +1575,7 @@ impl<H: RtmpHandler> Connection<H> {
                     if frame.is_keyframe || frame.is_header {
                         // Got a keyframe or header, resume normal operation
                         self.subscriber_state = SubscriberState::Normal;
+                        self.skip_audio_until_keyframe = false;
                         tracing::debug!(
                             session_id = self.state.id,
                             "Received keyframe, resuming normal playback"
@@ -1440,8 +1586,11 @@ impl<H: RtmpHandler> Connection<H> {
                     }
                 }
                 FrameType::Audio => {
-                    // Always forward audio (glitches are worse than skipping audio)
-                    // Audio frames are small, so this doesn't add much load
+                    // Skip audio after unpause to avoid audio playing while video frozen
+                    // But keep audio during lag recovery (glitches worse than brief desync)
+                    if self.skip_audio_until_keyframe {
+                        return Ok(());
+                    }
                 }
                 FrameType::Metadata => {
                     // Always forward metadata

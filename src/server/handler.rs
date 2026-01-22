@@ -151,6 +151,12 @@ pub trait RtmpHandler: Send + Sync + 'static {
     /// Called when the play stream ends
     async fn on_play_stop(&self, _ctx: &StreamContext) {}
 
+    /// Called when a subscriber pauses playback
+    async fn on_pause(&self, _ctx: &StreamContext) {}
+
+    /// Called when a subscriber resumes playback
+    async fn on_unpause(&self, _ctx: &StreamContext) {}
+
     /// Called when the connection closes
     async fn on_disconnect(&self, _ctx: &SessionContext) {}
 

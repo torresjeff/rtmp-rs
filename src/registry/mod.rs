@@ -498,6 +498,29 @@ impl StreamRegistry {
         }
     }
 
+    /// Get sequence headers for a stream (video and audio decoder config)
+    ///
+    /// Used when resuming playback after pause to reinitialize decoders.
+    pub async fn get_sequence_headers(&self, key: &StreamKey) -> Vec<BroadcastFrame> {
+        let streams = self.streams.read().await;
+
+        if let Some(entry_arc) = streams.get(key) {
+            let entry = entry_arc.read().await;
+            let mut frames = Vec::with_capacity(2);
+
+            if let Some(ref video) = entry.video_header {
+                frames.push(video.clone());
+            }
+            if let Some(ref audio) = entry.audio_header {
+                frames.push(audio.clone());
+            }
+
+            frames
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Check if a stream exists and has an active publisher
     pub async fn has_active_stream(&self, key: &StreamKey) -> bool {
         let streams = self.streams.read().await;

@@ -189,6 +189,8 @@ pub const NS_PLAY_START: &str = "NetStream.Play.Start";
 pub const NS_PLAY_RESET: &str = "NetStream.Play.Reset";
 pub const NS_PLAY_STOP: &str = "NetStream.Play.Stop";
 pub const NS_PLAY_STREAM_NOT_FOUND: &str = "NetStream.Play.StreamNotFound";
+pub const NS_PAUSE_NOTIFY: &str = "NetStream.Pause.Notify";
+pub const NS_UNPAUSE_NOTIFY: &str = "NetStream.Unpause.Notify";
 
 // ============================================================================
 // Default Server Settings
