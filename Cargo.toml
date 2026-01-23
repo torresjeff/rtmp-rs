@@ -26,3 +26,7 @@ path = "examples/simple_server.rs"
 [[example]]
 name = "puller"
 path = "examples/puller.rs"
+
+[[example]]
+name = "flv_recorder"
+path = "examples/flv_recorder.rs"
