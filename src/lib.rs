@@ -16,7 +16,6 @@
 //!
 //! struct MyHandler;
 //!
-//! #[async_trait::async_trait]
 //! impl RtmpHandler for MyHandler {
 //!     async fn on_connect(&self, _ctx: &SessionContext, _params: &ConnectParams) -> AuthResult {
 //!         AuthResult::Accept

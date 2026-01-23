@@ -3,7 +3,6 @@
 //! The main extension point for RTMP applications. Implement this trait
 //! to handle connection events, authentication, and media data.
 
-use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::amf::AmfValue;
@@ -64,7 +63,6 @@ pub enum MediaDeliveryMode {
 ///
 /// struct MyHandler;
 ///
-/// #[async_trait::async_trait]
 /// impl RtmpHandler for MyHandler {
 ///     async fn on_connect(&self, ctx: &SessionContext, params: &ConnectParams) -> AuthResult {
 ///         // Validate application name
@@ -85,80 +83,146 @@ pub enum MediaDeliveryMode {
 ///     }
 /// }
 /// ```
-#[async_trait]
 pub trait RtmpHandler: Send + Sync + 'static {
     /// Called when a new TCP connection is established
     ///
     /// Return false to immediately close the connection.
     /// Use this for IP-based rate limiting or blocklists.
-    async fn on_connection(&self, _ctx: &SessionContext) -> bool {
-        true
+    fn on_connection(
+        &self,
+        _ctx: &SessionContext,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        async { true }
     }
 
     /// Called after successful handshake, before connect command
-    async fn on_handshake_complete(&self, _ctx: &SessionContext) {}
+    fn on_handshake_complete(
+        &self,
+        _ctx: &SessionContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called on RTMP 'connect' command
     ///
     /// Validate the application name, auth tokens in tcUrl, etc.
-    async fn on_connect(&self, _ctx: &SessionContext, _params: &ConnectParams) -> AuthResult {
-        AuthResult::Accept
+    fn on_connect(
+        &self,
+        _ctx: &SessionContext,
+        _params: &ConnectParams,
+    ) -> impl std::future::Future<Output = AuthResult> + Send {
+        async { AuthResult::Accept }
     }
 
     /// Called on FCPublish command (OBS/Twitch compatibility)
     ///
     /// This is called before 'publish' and can be used for early stream key validation.
-    async fn on_fc_publish(&self, _ctx: &SessionContext, _stream_key: &str) -> AuthResult {
-        AuthResult::Accept
+    fn on_fc_publish(
+        &self,
+        _ctx: &SessionContext,
+        _stream_key: &str,
+    ) -> impl std::future::Future<Output = AuthResult> + Send {
+        async { AuthResult::Accept }
     }
 
     /// Called on 'publish' command
     ///
     /// Validate the stream key. This is the main authentication point for publishers.
-    async fn on_publish(&self, _ctx: &SessionContext, _params: &PublishParams) -> AuthResult {
-        AuthResult::Accept
+    fn on_publish(
+        &self,
+        _ctx: &SessionContext,
+        _params: &PublishParams,
+    ) -> impl std::future::Future<Output = AuthResult> + Send {
+        async { AuthResult::Accept }
     }
 
     /// Called on 'play' command
     ///
     /// Validate play access. Return Reject to deny playback.
-    async fn on_play(&self, _ctx: &SessionContext, _params: &PlayParams) -> AuthResult {
-        AuthResult::Accept
+    fn on_play(
+        &self,
+        _ctx: &SessionContext,
+        _params: &PlayParams,
+    ) -> impl std::future::Future<Output = AuthResult> + Send {
+        async { AuthResult::Accept }
     }
 
     /// Called when stream metadata is received (@setDataFrame/onMetaData)
-    async fn on_metadata(&self, _ctx: &StreamContext, _metadata: &HashMap<String, AmfValue>) {}
+    fn on_metadata(
+        &self,
+        _ctx: &StreamContext,
+        _metadata: &HashMap<String, AmfValue>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called for each raw FLV tag (when MediaDeliveryMode includes RawFlv)
     ///
     /// Return true to continue processing, false to drop the tag.
-    async fn on_media_tag(&self, _ctx: &StreamContext, _tag: &FlvTag) -> bool {
-        true
+    fn on_media_tag(
+        &self,
+        _ctx: &StreamContext,
+        _tag: &FlvTag,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        async { true }
     }
 
     /// Called for each video frame (when MediaDeliveryMode includes ParsedFrames)
-    async fn on_video_frame(&self, _ctx: &StreamContext, _frame: &H264Data, _timestamp: u32) {}
+    fn on_video_frame(
+        &self,
+        _ctx: &StreamContext,
+        _frame: &H264Data,
+        _timestamp: u32,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called for each audio frame (when MediaDeliveryMode includes ParsedFrames)
-    async fn on_audio_frame(&self, _ctx: &StreamContext, _frame: &AacData, _timestamp: u32) {}
+    fn on_audio_frame(
+        &self,
+        _ctx: &StreamContext,
+        _frame: &AacData,
+        _timestamp: u32,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when a keyframe is received
-    async fn on_keyframe(&self, _ctx: &StreamContext, _timestamp: u32) {}
+    fn on_keyframe(
+        &self,
+        _ctx: &StreamContext,
+        _timestamp: u32,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when the publish stream ends
-    async fn on_publish_stop(&self, _ctx: &StreamContext) {}
+    fn on_publish_stop(
+        &self,
+        _ctx: &StreamContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when the play stream ends
-    async fn on_play_stop(&self, _ctx: &StreamContext) {}
+    fn on_play_stop(&self, _ctx: &StreamContext) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when a subscriber pauses playback
-    async fn on_pause(&self, _ctx: &StreamContext) {}
+    fn on_pause(&self, _ctx: &StreamContext) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when a subscriber resumes playback
-    async fn on_unpause(&self, _ctx: &StreamContext) {}
+    fn on_unpause(&self, _ctx: &StreamContext) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Called when the connection closes
-    async fn on_disconnect(&self, _ctx: &SessionContext) {}
+    fn on_disconnect(&self, _ctx: &SessionContext) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 
     /// Get the media delivery mode for this handler
     fn media_delivery_mode(&self) -> MediaDeliveryMode {
@@ -166,13 +230,17 @@ pub trait RtmpHandler: Send + Sync + 'static {
     }
 
     /// Called periodically with stats update
-    async fn on_stats_update(&self, _ctx: &SessionContext) {}
+    fn on_stats_update(
+        &self,
+        _ctx: &SessionContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// A simple handler that accepts all connections and logs events
 pub struct LoggingHandler;
 
-#[async_trait]
 impl RtmpHandler for LoggingHandler {
     async fn on_connection(&self, ctx: &SessionContext) -> bool {
         tracing::info!(
@@ -231,7 +299,6 @@ where
     }
 }
 
-#[async_trait]
 impl<H1, H2> RtmpHandler for ChainedHandler<H1, H2>
 where
     H1: RtmpHandler,

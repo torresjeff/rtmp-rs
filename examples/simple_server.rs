@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use rtmp_rs::amf::AmfValue;
 use rtmp_rs::media::{AacData, FlvTag, H264Data};
 use rtmp_rs::protocol::message::{ConnectParams, PublishParams};
@@ -66,7 +65,6 @@ impl MyHandler {
     }
 }
 
-#[async_trait]
 impl RtmpHandler for MyHandler {
     async fn on_connection(&self, ctx: &SessionContext) -> bool {
         println!("[{}] New connection from {}", ctx.session_id, ctx.peer_addr);

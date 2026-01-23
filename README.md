@@ -1,7 +1,7 @@
 # rtmp-rs
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Build and tests](https://github.com/torresjeff/rtmp-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/torresjeff/rtmp-rs/actions/workflows/rust.yml)
 
 **Async RTMP server and client library for Rust** - Build live video streaming infrastructure with Tokio.
@@ -36,7 +36,6 @@ use rtmp_rs::protocol::message::{ConnectParams, PublishParams};
 
 struct MyHandler;
 
-#[async_trait::async_trait]
 impl RtmpHandler for MyHandler {
     async fn on_connect(&self, _ctx: &SessionContext, params: &ConnectParams) -> AuthResult {
         println!("App: {}", params.app);
@@ -112,7 +111,6 @@ use rtmp_rs::protocol::message::PublishParams;
 
 struct AuthHandler;
 
-#[async_trait::async_trait]
 impl RtmpHandler for AuthHandler {
     // Only override what you need - everything else uses defaults
     async fn on_publish(&self, _ctx: &SessionContext, params: &PublishParams) -> AuthResult {
