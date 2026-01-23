@@ -6,7 +6,7 @@
 
 **Async RTMP server and client library for Rust** - Build live video streaming infrastructure with Tokio.
 
-**rtmp-rs** is an RTMP server library written in Rust, built to handle the messy reality of live streaming. Encoders like OBS and FFmpeg all have their quirks, so rtmp-rs uses lenient parsing to roll with it instead of rejecting non-conforming streams. Late joiners get instant playback with keyframe caching, and smart backpressure handling keeps audio flowing for slow subscribers while selectively dropping video frames. If you're building a streaming service or relay and want RTMP ingest that just works, this might be what you're looking for.
+**rtmp-rs** is an RTMP server and client library written in Rust, built to handle the messy reality of live streaming. Encoders like OBS and FFmpeg all have their quirks, so rtmp-rs uses lenient parsing to roll with it instead of rejecting non-conforming streams. Late joiners get instant playback with keyframe caching, and smart backpressure handling keeps audio flowing for slow subscribers while selectively dropping video frames. If you're building a streaming service or relay and want RTMP ingest that just works, this might be what you're looking for.
 
 
 ## Features

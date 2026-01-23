@@ -8,6 +8,9 @@ license = "MIT"
 repository = "https://github.com/torresjeff/rtmp-rs"
 keywords = ["rtmp", "streaming", "video", "live"]
 categories = ["multimedia::video", "network-programming"]
+exclude = [
+    "assets/*",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
