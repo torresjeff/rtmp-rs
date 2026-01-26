@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::amf::AmfValue;
-use crate::media::{AacData, FlvTag, H264Data};
+use crate::media::{AacData, EnhancedAudioData, EnhancedVideoData, FlvTag, H264Data};
 use crate::protocol::message::{ConnectParams, PlayParams, PublishParams};
 use crate::session::{SessionContext, StreamContext};
 
@@ -239,6 +239,42 @@ pub trait RtmpHandler: Send + Sync + 'static {
     fn on_stats_update(
         &self,
         _ctx: &SessionContext,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
+    // =========================================================================
+    // Enhanced RTMP (E-RTMP) callbacks
+    // =========================================================================
+
+    /// Called for each enhanced video frame (E-RTMP mode).
+    ///
+    /// This is called when the client sends video using enhanced RTMP format
+    /// (HEVC, AV1, VP9, etc. via FOURCC signaling).
+    ///
+    /// Default implementation does nothing. Implement this to handle
+    /// modern video codecs beyond H.264.
+    fn on_enhanced_video_frame(
+        &self,
+        _ctx: &StreamContext,
+        _frame: &EnhancedVideoData,
+        _timestamp: u32,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// Called for each enhanced audio frame (E-RTMP mode).
+    ///
+    /// This is called when the client sends audio using enhanced RTMP format
+    /// (Opus, FLAC, AC-3, etc. via FOURCC signaling).
+    ///
+    /// Default implementation does nothing. Implement this to handle
+    /// modern audio codecs beyond AAC.
+    fn on_enhanced_audio_frame(
+        &self,
+        _ctx: &StreamContext,
+        _frame: &EnhancedAudioData,
+        _timestamp: u32,
     ) -> impl std::future::Future<Output = ()> + Send {
         async {}
     }
