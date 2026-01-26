@@ -132,6 +132,26 @@ impl VideoFourCc {
         Self::from_fourcc(FourCC::from_u32(value))
     }
 
+    /// Parse from a FOURCC string (e.g., "avc1", "hvc1").
+    ///
+    /// This is useful for parsing E-RTMP connect parameters.
+    pub fn from_fourcc_str(s: &str) -> Option<Self> {
+        FourCC::from_str(s).and_then(Self::from_fourcc)
+    }
+
+    /// Get the FOURCC as a string slice.
+    ///
+    /// This is useful for encoding E-RTMP connect responses.
+    pub fn as_fourcc_str(&self) -> &'static str {
+        match self {
+            VideoFourCc::Avc => "avc1",
+            VideoFourCc::Hevc => "hvc1",
+            VideoFourCc::Av1 => "av01",
+            VideoFourCc::Vp9 => "vp09",
+            VideoFourCc::Vp8 => "vp08",
+        }
+    }
+
     /// Get the codec name as a string.
     pub const fn name(&self) -> &'static str {
         match self {
@@ -221,6 +241,27 @@ impl AudioFourCc {
     /// Parse from a u32 value (big-endian FOURCC encoding).
     pub fn from_u32(value: u32) -> Option<Self> {
         Self::from_fourcc(FourCC::from_u32(value))
+    }
+
+    /// Parse from a FOURCC string (e.g., "mp4a", "Opus").
+    ///
+    /// This is useful for parsing E-RTMP connect parameters.
+    pub fn from_fourcc_str(s: &str) -> Option<Self> {
+        FourCC::from_str(s).and_then(Self::from_fourcc)
+    }
+
+    /// Get the FOURCC as a string slice.
+    ///
+    /// This is useful for encoding E-RTMP connect responses.
+    pub fn as_fourcc_str(&self) -> &'static str {
+        match self {
+            AudioFourCc::Aac => "mp4a",
+            AudioFourCc::Opus => "Opus",
+            AudioFourCc::Flac => "fLaC",
+            AudioFourCc::Ac3 => "ac-3",
+            AudioFourCc::Eac3 => "ec-3",
+            AudioFourCc::Mp3 => ".mp3",
+        }
     }
 
     /// Get the codec name as a string.
@@ -462,5 +503,94 @@ mod tests {
     fn test_audio_fourcc_display() {
         assert_eq!(format!("{}", AudioFourCc::Aac), "AAC");
         assert_eq!(format!("{}", AudioFourCc::Opus), "Opus");
+    }
+
+    #[test]
+    fn test_video_fourcc_from_fourcc_str() {
+        assert_eq!(VideoFourCc::from_fourcc_str("avc1"), Some(VideoFourCc::Avc));
+        assert_eq!(
+            VideoFourCc::from_fourcc_str("hvc1"),
+            Some(VideoFourCc::Hevc)
+        );
+        assert_eq!(VideoFourCc::from_fourcc_str("av01"), Some(VideoFourCc::Av1));
+        assert_eq!(VideoFourCc::from_fourcc_str("vp09"), Some(VideoFourCc::Vp9));
+        assert_eq!(VideoFourCc::from_fourcc_str("vp08"), Some(VideoFourCc::Vp8));
+
+        // Invalid
+        assert_eq!(VideoFourCc::from_fourcc_str("xxxx"), None);
+        assert_eq!(VideoFourCc::from_fourcc_str("avc"), None); // Too short
+        assert_eq!(VideoFourCc::from_fourcc_str("avc12"), None); // Too long
+    }
+
+    #[test]
+    fn test_video_fourcc_as_fourcc_str() {
+        assert_eq!(VideoFourCc::Avc.as_fourcc_str(), "avc1");
+        assert_eq!(VideoFourCc::Hevc.as_fourcc_str(), "hvc1");
+        assert_eq!(VideoFourCc::Av1.as_fourcc_str(), "av01");
+        assert_eq!(VideoFourCc::Vp9.as_fourcc_str(), "vp09");
+        assert_eq!(VideoFourCc::Vp8.as_fourcc_str(), "vp08");
+    }
+
+    #[test]
+    fn test_audio_fourcc_from_fourcc_str() {
+        assert_eq!(AudioFourCc::from_fourcc_str("mp4a"), Some(AudioFourCc::Aac));
+        assert_eq!(
+            AudioFourCc::from_fourcc_str("Opus"),
+            Some(AudioFourCc::Opus)
+        );
+        assert_eq!(
+            AudioFourCc::from_fourcc_str("fLaC"),
+            Some(AudioFourCc::Flac)
+        );
+        assert_eq!(AudioFourCc::from_fourcc_str("ac-3"), Some(AudioFourCc::Ac3));
+        assert_eq!(
+            AudioFourCc::from_fourcc_str("ec-3"),
+            Some(AudioFourCc::Eac3)
+        );
+        assert_eq!(AudioFourCc::from_fourcc_str(".mp3"), Some(AudioFourCc::Mp3));
+
+        // Invalid
+        assert_eq!(AudioFourCc::from_fourcc_str("xxxx"), None);
+        assert_eq!(AudioFourCc::from_fourcc_str("opus"), None); // Case sensitive
+    }
+
+    #[test]
+    fn test_audio_fourcc_as_fourcc_str() {
+        assert_eq!(AudioFourCc::Aac.as_fourcc_str(), "mp4a");
+        assert_eq!(AudioFourCc::Opus.as_fourcc_str(), "Opus");
+        assert_eq!(AudioFourCc::Flac.as_fourcc_str(), "fLaC");
+        assert_eq!(AudioFourCc::Ac3.as_fourcc_str(), "ac-3");
+        assert_eq!(AudioFourCc::Eac3.as_fourcc_str(), "ec-3");
+        assert_eq!(AudioFourCc::Mp3.as_fourcc_str(), ".mp3");
+    }
+
+    #[test]
+    fn test_fourcc_str_roundtrip() {
+        // Video roundtrip
+        for codec in [
+            VideoFourCc::Avc,
+            VideoFourCc::Hevc,
+            VideoFourCc::Av1,
+            VideoFourCc::Vp9,
+            VideoFourCc::Vp8,
+        ] {
+            let s = codec.as_fourcc_str();
+            let parsed = VideoFourCc::from_fourcc_str(s).unwrap();
+            assert_eq!(parsed, codec);
+        }
+
+        // Audio roundtrip
+        for codec in [
+            AudioFourCc::Aac,
+            AudioFourCc::Opus,
+            AudioFourCc::Flac,
+            AudioFourCc::Ac3,
+            AudioFourCc::Eac3,
+            AudioFourCc::Mp3,
+        ] {
+            let s = codec.as_fourcc_str();
+            let parsed = AudioFourCc::from_fourcc_str(s).unwrap();
+            assert_eq!(parsed, codec);
+        }
     }
 }

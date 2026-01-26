@@ -16,4 +16,4 @@ pub mod quirks;
 pub use chunk::{ChunkDecoder, ChunkEncoder};
 pub use enhanced::{CapsEx, EnhancedCapabilities, EnhancedRtmpMode, FourCcCapability};
 pub use handshake::{Handshake, HandshakeRole};
-pub use message::RtmpMessage;
+pub use message::{ConnectParams, ConnectResponseBuilder, RtmpMessage};

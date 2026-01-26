@@ -13,8 +13,10 @@ use std::collections::HashMap;
 
 use crate::amf::{Amf0Decoder, Amf0Encoder, AmfValue};
 use crate::error::{AmfError, ProtocolError, Result};
+use crate::media::fourcc::{AudioFourCc, VideoFourCc};
 use crate::protocol::chunk::RtmpChunk;
 use crate::protocol::constants::*;
+use crate::protocol::enhanced::{CapsEx, EnhancedCapabilities, FourCcCapability};
 
 /// Parsed RTMP message
 #[derive(Debug, Clone)]
@@ -126,6 +128,36 @@ pub struct ConnectParams {
     pub object_encoding: f64,
     /// Extra properties from connect object
     pub extra: HashMap<String, AmfValue>,
+
+    // =========================================================================
+    // Enhanced RTMP (E-RTMP) fields
+    // =========================================================================
+    /// List of supported FOURCC codec strings (e.g., ["avc1", "hvc1", "av01"])
+    ///
+    /// This is an alternative to the info maps; if present, all listed codecs
+    /// are assumed to have full capability (decode + encode + forward).
+    pub fourcc_list: Option<Vec<String>>,
+
+    /// Video codec capabilities by FOURCC string.
+    ///
+    /// Maps FOURCC strings (e.g., "avc1", "hvc1") to capability bitmask:
+    /// - 0x01: Can decode
+    /// - 0x02: Can encode
+    /// - 0x04: Can forward/relay
+    pub video_fourcc_info_map: Option<HashMap<String, u32>>,
+
+    /// Audio codec capabilities by FOURCC string.
+    ///
+    /// Maps FOURCC strings (e.g., "mp4a", "Opus") to capability bitmask.
+    pub audio_fourcc_info_map: Option<HashMap<String, u32>>,
+
+    /// Extended capabilities bitmask (E-RTMP capsEx field).
+    ///
+    /// - 0x01: Reconnect support
+    /// - 0x02: Multitrack support
+    /// - 0x04: ModEx signal parsing
+    /// - 0x08: Nanosecond timestamp offset
+    pub caps_ex: Option<u32>,
 }
 
 impl ConnectParams {
@@ -168,6 +200,19 @@ impl ConnectParams {
                     "objectEncoding" | "objectencoding" => {
                         params.object_encoding = value.as_number().unwrap_or(0.0);
                     }
+                    // E-RTMP fields
+                    "fourCcList" => {
+                        params.fourcc_list = Self::parse_fourcc_list(value);
+                    }
+                    "videoFourCcInfoMap" => {
+                        params.video_fourcc_info_map = Self::parse_fourcc_info_map(value);
+                    }
+                    "audioFourCcInfoMap" => {
+                        params.audio_fourcc_info_map = Self::parse_fourcc_info_map(value);
+                    }
+                    "capsEx" => {
+                        params.caps_ex = value.as_number().map(|n| n as u32);
+                    }
                     _ => {
                         params.extra.insert(key.clone(), value.clone());
                     }
@@ -176,6 +221,114 @@ impl ConnectParams {
         }
 
         params
+    }
+
+    /// Parse a fourCcList array from AMF value.
+    fn parse_fourcc_list(value: &AmfValue) -> Option<Vec<String>> {
+        if let AmfValue::Array(arr) = value {
+            let list: Vec<String> = arr
+                .iter()
+                .filter_map(|v: &AmfValue| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if list.is_empty() {
+                None
+            } else {
+                Some(list)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Parse a FOURCC info map (videoFourCcInfoMap/audioFourCcInfoMap) from AMF value.
+    fn parse_fourcc_info_map(value: &AmfValue) -> Option<HashMap<String, u32>> {
+        if let Some(map) = value.as_object() {
+            let info_map: HashMap<String, u32> = map
+                .iter()
+                .filter_map(|(k, v)| v.as_number().map(|n| (k.clone(), n as u32)))
+                .collect();
+            if info_map.is_empty() {
+                None
+            } else {
+                Some(info_map)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Check if this connect request includes E-RTMP capabilities.
+    ///
+    /// Returns true if any E-RTMP fields are present (fourCcList, info maps, or capsEx).
+    pub fn has_enhanced_rtmp(&self) -> bool {
+        self.fourcc_list.is_some()
+            || self.video_fourcc_info_map.is_some()
+            || self.audio_fourcc_info_map.is_some()
+            || self.caps_ex.is_some()
+    }
+
+    /// Get the CapsEx flags if present.
+    pub fn caps_ex_flags(&self) -> CapsEx {
+        CapsEx::from_bits(self.caps_ex.unwrap_or(0))
+    }
+
+    /// Convert E-RTMP fields to EnhancedCapabilities for negotiation.
+    ///
+    /// This extracts the client's declared capabilities from the connect params.
+    pub fn to_enhanced_capabilities(&self) -> EnhancedCapabilities {
+        if !self.has_enhanced_rtmp() {
+            return EnhancedCapabilities::new();
+        }
+
+        let mut caps = EnhancedCapabilities {
+            enabled: true,
+            caps_ex: self.caps_ex_flags(),
+            video_codecs: HashMap::new(),
+            audio_codecs: HashMap::new(),
+            ..Default::default()
+        };
+
+        // Parse video FOURCC info map
+        if let Some(map) = &self.video_fourcc_info_map {
+            for (fourcc_str, capability_bits) in map {
+                if let Some(fourcc) = VideoFourCc::from_fourcc_str(fourcc_str) {
+                    caps.video_codecs
+                        .insert(fourcc, FourCcCapability::from_bits(*capability_bits));
+                }
+            }
+        }
+
+        // Parse audio FOURCC info map
+        if let Some(map) = &self.audio_fourcc_info_map {
+            for (fourcc_str, capability_bits) in map {
+                if let Some(fourcc) = AudioFourCc::from_fourcc_str(fourcc_str) {
+                    caps.audio_codecs
+                        .insert(fourcc, FourCcCapability::from_bits(*capability_bits));
+                }
+            }
+        }
+
+        // If only fourCcList is provided (no info maps), treat all as full capability
+        if let Some(list) = &self.fourcc_list {
+            if self.video_fourcc_info_map.is_none() && self.audio_fourcc_info_map.is_none() {
+                for fourcc_str in list {
+                    // Try parsing as video codec
+                    if let Some(fourcc) = VideoFourCc::from_fourcc_str(fourcc_str) {
+                        caps.video_codecs
+                            .entry(fourcc)
+                            .or_insert(FourCcCapability::full());
+                    }
+                    // Try parsing as audio codec
+                    if let Some(fourcc) = AudioFourCc::from_fourcc_str(fourcc_str) {
+                        caps.audio_codecs
+                            .entry(fourcc)
+                            .or_insert(FourCcCapability::full());
+                    }
+                }
+            }
+        }
+
+        caps
     }
 }
 
@@ -579,6 +732,144 @@ impl Command {
             arguments: vec![AmfValue::Object(info)],
             stream_id,
         }
+    }
+}
+
+/// Builder for connect response with E-RTMP capability negotiation.
+///
+/// Use this to construct a proper `_result` response to a connect command,
+/// optionally including E-RTMP capability fields.
+///
+/// # Example
+///
+/// ```ignore
+/// use rtmp_rs::protocol::message::ConnectResponseBuilder;
+/// use rtmp_rs::protocol::enhanced::EnhancedCapabilities;
+///
+/// let caps = EnhancedCapabilities::with_defaults();
+/// let response = ConnectResponseBuilder::new()
+///     .fms_ver("rtmp-rs/0.5.0")
+///     .capabilities(31)
+///     .enhanced_capabilities(&caps)
+///     .build(1.0);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ConnectResponseBuilder {
+    fms_ver: String,
+    capabilities: u32,
+    enhanced_caps: Option<EnhancedCapabilities>,
+}
+
+impl ConnectResponseBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
+        Self {
+            fms_ver: "FMS/3,5,7,7009".to_string(),
+            capabilities: 31,
+            enhanced_caps: None,
+        }
+    }
+
+    /// Set the FMS version string.
+    pub fn fms_ver(mut self, ver: impl Into<String>) -> Self {
+        self.fms_ver = ver.into();
+        self
+    }
+
+    /// Set the capabilities bitmask.
+    pub fn capabilities(mut self, caps: u32) -> Self {
+        self.capabilities = caps;
+        self
+    }
+
+    /// Set E-RTMP enhanced capabilities.
+    ///
+    /// If the capabilities are enabled, the response will include
+    /// E-RTMP fields (capsEx, videoFourCcInfoMap, audioFourCcInfoMap).
+    pub fn enhanced_capabilities(mut self, caps: &EnhancedCapabilities) -> Self {
+        if caps.enabled {
+            self.enhanced_caps = Some(caps.clone());
+        }
+        self
+    }
+
+    /// Build the connect response command.
+    pub fn build(self, transaction_id: f64) -> Command {
+        let properties = self.build_properties();
+
+        let mut info = HashMap::new();
+        info.insert("level".to_string(), AmfValue::String("status".to_string()));
+        info.insert(
+            "code".to_string(),
+            AmfValue::String(NC_CONNECT_SUCCESS.to_string()),
+        );
+        info.insert(
+            "description".to_string(),
+            AmfValue::String("Connection succeeded.".to_string()),
+        );
+        info.insert(
+            "objectEncoding".to_string(),
+            AmfValue::Number(0.0), // AMF0
+        );
+
+        Command::result(transaction_id, properties, AmfValue::Object(info))
+    }
+
+    /// Build the properties object for the connect response.
+    fn build_properties(&self) -> AmfValue {
+        let mut props = HashMap::new();
+        props.insert("fmsVer".to_string(), AmfValue::String(self.fms_ver.clone()));
+        props.insert(
+            "capabilities".to_string(),
+            AmfValue::Number(self.capabilities as f64),
+        );
+
+        // Add E-RTMP fields if enabled
+        if let Some(caps) = &self.enhanced_caps {
+            // capsEx
+            props.insert(
+                "capsEx".to_string(),
+                AmfValue::Number(caps.caps_ex.bits() as f64),
+            );
+
+            // videoFourCcInfoMap
+            if !caps.video_codecs.is_empty() {
+                let video_map: HashMap<String, AmfValue> = caps
+                    .video_codecs
+                    .iter()
+                    .map(|(fourcc, cap)| {
+                        (
+                            fourcc.as_fourcc_str().to_string(),
+                            AmfValue::Number(cap.bits() as f64),
+                        )
+                    })
+                    .collect();
+                props.insert(
+                    "videoFourCcInfoMap".to_string(),
+                    AmfValue::Object(video_map),
+                );
+            }
+
+            // audioFourCcInfoMap
+            if !caps.audio_codecs.is_empty() {
+                let audio_map: HashMap<String, AmfValue> = caps
+                    .audio_codecs
+                    .iter()
+                    .map(|(fourcc, cap)| {
+                        (
+                            fourcc.as_fourcc_str().to_string(),
+                            AmfValue::Number(cap.bits() as f64),
+                        )
+                    })
+                    .collect();
+                props.insert(
+                    "audioFourCcInfoMap".to_string(),
+                    AmfValue::Object(audio_map),
+                );
+            }
+        }
+
+        AmfValue::Object(props)
     }
 }
 
@@ -1116,5 +1407,249 @@ mod tests {
 
         let result = RtmpMessage::from_chunk(&chunk);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // E-RTMP Connect Tests
+    // =========================================================================
+
+    #[test]
+    fn test_connect_params_ertmp_fields() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+
+        // E-RTMP fields
+        obj.insert("capsEx".to_string(), AmfValue::Number(3.0)); // RECONNECT | MULTITRACK
+
+        let mut video_map = HashMap::new();
+        video_map.insert("avc1".to_string(), AmfValue::Number(7.0)); // Full capability
+        video_map.insert("hvc1".to_string(), AmfValue::Number(4.0)); // Forward only
+        obj.insert(
+            "videoFourCcInfoMap".to_string(),
+            AmfValue::Object(video_map),
+        );
+
+        let mut audio_map = HashMap::new();
+        audio_map.insert("mp4a".to_string(), AmfValue::Number(7.0));
+        audio_map.insert("Opus".to_string(), AmfValue::Number(4.0));
+        obj.insert(
+            "audioFourCcInfoMap".to_string(),
+            AmfValue::Object(audio_map),
+        );
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+
+        assert!(params.has_enhanced_rtmp());
+        assert_eq!(params.caps_ex, Some(3));
+        assert!(params.video_fourcc_info_map.is_some());
+        assert!(params.audio_fourcc_info_map.is_some());
+
+        let video_map = params.video_fourcc_info_map.unwrap();
+        assert_eq!(video_map.get("avc1"), Some(&7));
+        assert_eq!(video_map.get("hvc1"), Some(&4));
+
+        let audio_map = params.audio_fourcc_info_map.unwrap();
+        assert_eq!(audio_map.get("mp4a"), Some(&7));
+        assert_eq!(audio_map.get("Opus"), Some(&4));
+    }
+
+    #[test]
+    fn test_connect_params_fourcc_list() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+
+        // fourCcList as alternative to info maps
+        obj.insert(
+            "fourCcList".to_string(),
+            AmfValue::Array(vec![
+                AmfValue::String("avc1".into()),
+                AmfValue::String("hvc1".into()),
+                AmfValue::String("mp4a".into()),
+            ]),
+        );
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+
+        assert!(params.has_enhanced_rtmp());
+        let list = params.fourcc_list.unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.contains(&"avc1".to_string()));
+        assert!(list.contains(&"hvc1".to_string()));
+        assert!(list.contains(&"mp4a".to_string()));
+    }
+
+    #[test]
+    fn test_connect_params_no_ertmp() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+
+        assert!(!params.has_enhanced_rtmp());
+        assert!(params.fourcc_list.is_none());
+        assert!(params.video_fourcc_info_map.is_none());
+        assert!(params.audio_fourcc_info_map.is_none());
+        assert!(params.caps_ex.is_none());
+    }
+
+    #[test]
+    fn test_connect_params_caps_ex_flags() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+        obj.insert("capsEx".to_string(), AmfValue::Number(15.0)); // All flags
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+        let caps = params.caps_ex_flags();
+
+        assert!(caps.supports_reconnect());
+        assert!(caps.supports_multitrack());
+        assert!(caps.supports_modex());
+        assert!(caps.supports_timestamp_nano_offset());
+    }
+
+    #[test]
+    fn test_connect_params_to_enhanced_capabilities() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+        obj.insert("capsEx".to_string(), AmfValue::Number(6.0)); // MULTITRACK | MODEX
+
+        let mut video_map = HashMap::new();
+        video_map.insert("avc1".to_string(), AmfValue::Number(7.0));
+        video_map.insert("av01".to_string(), AmfValue::Number(4.0));
+        obj.insert(
+            "videoFourCcInfoMap".to_string(),
+            AmfValue::Object(video_map),
+        );
+
+        let mut audio_map = HashMap::new();
+        audio_map.insert("Opus".to_string(), AmfValue::Number(7.0));
+        obj.insert(
+            "audioFourCcInfoMap".to_string(),
+            AmfValue::Object(audio_map),
+        );
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+        let caps = params.to_enhanced_capabilities();
+
+        assert!(caps.enabled);
+        assert!(caps.supports_multitrack());
+        assert!(caps.caps_ex.supports_modex());
+        assert!(!caps.caps_ex.supports_reconnect());
+
+        assert!(caps.supports_video_codec(VideoFourCc::Avc));
+        assert!(caps.supports_video_codec(VideoFourCc::Av1));
+        assert!(!caps.supports_video_codec(VideoFourCc::Hevc));
+
+        assert!(caps.supports_audio_codec(AudioFourCc::Opus));
+        assert!(!caps.supports_audio_codec(AudioFourCc::Aac));
+    }
+
+    #[test]
+    fn test_connect_params_fourcc_list_to_capabilities() {
+        let mut obj = HashMap::new();
+        obj.insert("app".to_string(), AmfValue::String("live".into()));
+
+        // Only fourCcList (no info maps) -> full capability assumed
+        obj.insert(
+            "fourCcList".to_string(),
+            AmfValue::Array(vec![
+                AmfValue::String("avc1".into()),
+                AmfValue::String("Opus".into()),
+            ]),
+        );
+
+        let params = ConnectParams::from_amf(&AmfValue::Object(obj));
+        let caps = params.to_enhanced_capabilities();
+
+        assert!(caps.enabled);
+
+        // Both should have full capability
+        let avc_cap = caps.video_codec_capability(VideoFourCc::Avc).unwrap();
+        assert!(avc_cap.can_decode());
+        assert!(avc_cap.can_encode());
+        assert!(avc_cap.can_forward());
+
+        let opus_cap = caps.audio_codec_capability(AudioFourCc::Opus).unwrap();
+        assert!(opus_cap.can_decode());
+        assert!(opus_cap.can_encode());
+        assert!(opus_cap.can_forward());
+    }
+
+    #[test]
+    fn test_connect_response_builder_basic() {
+        let response = ConnectResponseBuilder::new()
+            .fms_ver("rtmp-rs/0.5.0")
+            .capabilities(31)
+            .build(1.0);
+
+        assert_eq!(response.name, "_result");
+        assert_eq!(response.transaction_id, 1.0);
+
+        // Check properties
+        if let AmfValue::Object(props) = &response.command_object {
+            assert_eq!(props.get("fmsVer").unwrap().as_str(), Some("rtmp-rs/0.5.0"));
+            assert_eq!(props.get("capabilities").unwrap().as_number(), Some(31.0));
+            // No E-RTMP fields
+            assert!(!props.contains_key("capsEx"));
+            assert!(!props.contains_key("videoFourCcInfoMap"));
+            assert!(!props.contains_key("audioFourCcInfoMap"));
+        } else {
+            panic!("Expected Object in command_object");
+        }
+    }
+
+    #[test]
+    fn test_connect_response_builder_with_ertmp() {
+        let caps = EnhancedCapabilities::with_defaults();
+
+        let response = ConnectResponseBuilder::new()
+            .fms_ver("rtmp-rs/0.5.0")
+            .capabilities(31)
+            .enhanced_capabilities(&caps)
+            .build(1.0);
+
+        // Check properties include E-RTMP fields
+        if let AmfValue::Object(props) = &response.command_object {
+            assert!(props.contains_key("capsEx"));
+            assert!(props.contains_key("videoFourCcInfoMap"));
+            assert!(props.contains_key("audioFourCcInfoMap"));
+
+            // Check video info map
+            if let AmfValue::Object(video_map) = props.get("videoFourCcInfoMap").unwrap() {
+                assert!(video_map.contains_key("avc1"));
+                assert!(video_map.contains_key("hvc1"));
+                assert!(video_map.contains_key("av01"));
+            } else {
+                panic!("Expected Object for videoFourCcInfoMap");
+            }
+
+            // Check audio info map
+            if let AmfValue::Object(audio_map) = props.get("audioFourCcInfoMap").unwrap() {
+                assert!(audio_map.contains_key("mp4a"));
+                assert!(audio_map.contains_key("Opus"));
+            } else {
+                panic!("Expected Object for audioFourCcInfoMap");
+            }
+        } else {
+            panic!("Expected Object in command_object");
+        }
+    }
+
+    #[test]
+    fn test_connect_response_builder_disabled_ertmp() {
+        let caps = EnhancedCapabilities::new(); // disabled
+
+        let response = ConnectResponseBuilder::new()
+            .enhanced_capabilities(&caps)
+            .build(1.0);
+
+        // Should not include E-RTMP fields when disabled
+        if let AmfValue::Object(props) = &response.command_object {
+            assert!(!props.contains_key("capsEx"));
+            assert!(!props.contains_key("videoFourCcInfoMap"));
+            assert!(!props.contains_key("audioFourCcInfoMap"));
+        } else {
+            panic!("Expected Object in command_object");
+        }
     }
 }
