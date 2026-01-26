@@ -173,6 +173,14 @@ pub enum MediaError {
     UnsupportedCodec(String),
     InvalidNalu,
     MissingSequenceHeader,
+    /// Invalid enhanced video packet (E-RTMP)
+    InvalidEnhancedVideoPacket,
+    /// Invalid enhanced audio packet (E-RTMP)
+    InvalidEnhancedAudioPacket,
+    /// Unsupported video codec FOURCC
+    UnsupportedVideoCodec,
+    /// Unsupported audio codec FOURCC
+    UnsupportedAudioCodec,
 }
 
 impl fmt::Display for MediaError {
@@ -184,6 +192,10 @@ impl fmt::Display for MediaError {
             MediaError::UnsupportedCodec(c) => write!(f, "Unsupported codec: {}", c),
             MediaError::InvalidNalu => write!(f, "Invalid NAL unit"),
             MediaError::MissingSequenceHeader => write!(f, "Missing sequence header"),
+            MediaError::InvalidEnhancedVideoPacket => write!(f, "Invalid enhanced video packet"),
+            MediaError::InvalidEnhancedAudioPacket => write!(f, "Invalid enhanced audio packet"),
+            MediaError::UnsupportedVideoCodec => write!(f, "Unsupported video codec FOURCC"),
+            MediaError::UnsupportedAudioCodec => write!(f, "Unsupported audio codec FOURCC"),
         }
     }
 }
@@ -364,5 +376,17 @@ mod tests {
         assert!(MediaError::MissingSequenceHeader
             .to_string()
             .contains("sequence"));
+        assert!(MediaError::InvalidEnhancedVideoPacket
+            .to_string()
+            .contains("enhanced video"));
+        assert!(MediaError::InvalidEnhancedAudioPacket
+            .to_string()
+            .contains("enhanced audio"));
+        assert!(MediaError::UnsupportedVideoCodec
+            .to_string()
+            .contains("video codec"));
+        assert!(MediaError::UnsupportedAudioCodec
+            .to_string()
+            .contains("audio codec"));
     }
 }
