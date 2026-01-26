@@ -3,7 +3,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::media::fourcc::{AudioFourCc, VideoFourCc};
 use crate::protocol::constants::*;
+use crate::protocol::enhanced::{CapsEx, EnhancedRtmpMode, FourCcCapability};
 
 /// Server configuration options
 #[derive(Debug, Clone)]
@@ -52,6 +54,105 @@ pub struct ServerConfig {
 
     /// Stats update interval
     pub stats_interval: Duration,
+
+    /// Enhanced RTMP mode (Auto, LegacyOnly, or EnhancedOnly)
+    pub enhanced_rtmp: EnhancedRtmpMode,
+
+    /// Enhanced RTMP server capabilities to advertise
+    pub enhanced_capabilities: EnhancedServerCapabilities,
+}
+
+/// Server-side Enhanced RTMP capabilities.
+///
+/// Configure which E-RTMP features and codecs the server supports.
+#[derive(Debug, Clone)]
+pub struct EnhancedServerCapabilities {
+    /// Support for NetConnection.Connect.ReconnectRequest
+    pub reconnect: bool,
+
+    /// Support for multitrack audio/video streams
+    pub multitrack: bool,
+
+    /// Support for ModEx signal parsing (nanosecond timestamps, etc.)
+    pub modex: bool,
+
+    /// Video codecs supported with their capabilities
+    pub video_codecs: Vec<(VideoFourCc, FourCcCapability)>,
+
+    /// Audio codecs supported with their capabilities
+    pub audio_codecs: Vec<(AudioFourCc, FourCcCapability)>,
+}
+
+impl Default for EnhancedServerCapabilities {
+    fn default() -> Self {
+        Self {
+            reconnect: false,
+            multitrack: false,
+            modex: true, // Parse ModEx but don't require it
+            video_codecs: vec![
+                (VideoFourCc::Avc, FourCcCapability::forward()),
+                (VideoFourCc::Hevc, FourCcCapability::forward()),
+                (VideoFourCc::Av1, FourCcCapability::forward()),
+                (VideoFourCc::Vp9, FourCcCapability::forward()),
+            ],
+            audio_codecs: vec![
+                (AudioFourCc::Aac, FourCcCapability::forward()),
+                (AudioFourCc::Opus, FourCcCapability::forward()),
+            ],
+        }
+    }
+}
+
+impl EnhancedServerCapabilities {
+    /// Create capabilities with no codec support (minimal E-RTMP).
+    pub fn minimal() -> Self {
+        Self {
+            reconnect: false,
+            multitrack: false,
+            modex: true,
+            video_codecs: vec![],
+            audio_codecs: vec![],
+        }
+    }
+
+    /// Add a video codec with specified capability.
+    pub fn with_video_codec(mut self, codec: VideoFourCc, cap: FourCcCapability) -> Self {
+        self.video_codecs.push((codec, cap));
+        self
+    }
+
+    /// Add an audio codec with specified capability.
+    pub fn with_audio_codec(mut self, codec: AudioFourCc, cap: FourCcCapability) -> Self {
+        self.audio_codecs.push((codec, cap));
+        self
+    }
+
+    /// Enable reconnect support.
+    pub fn with_reconnect(mut self) -> Self {
+        self.reconnect = true;
+        self
+    }
+
+    /// Enable multitrack support.
+    pub fn with_multitrack(mut self) -> Self {
+        self.multitrack = true;
+        self
+    }
+
+    /// Convert to CapsEx bitmask for protocol encoding.
+    pub fn to_caps_ex(&self) -> CapsEx {
+        let mut caps = CapsEx::empty();
+        if self.reconnect {
+            caps.insert(CapsEx::RECONNECT);
+        }
+        if self.multitrack {
+            caps.insert(CapsEx::MULTITRACK);
+        }
+        if self.modex {
+            caps.insert(CapsEx::MODEX);
+        }
+        caps
+    }
 }
 
 impl Default for ServerConfig {
@@ -72,6 +173,8 @@ impl Default for ServerConfig {
             gop_buffer_enabled: true,
             gop_buffer_max_size: 4 * 1024 * 1024, // 4MB
             stats_interval: Duration::from_secs(5),
+            enhanced_rtmp: EnhancedRtmpMode::Auto,
+            enhanced_capabilities: EnhancedServerCapabilities::default(),
         }
     }
 }
@@ -120,6 +223,22 @@ impl ServerConfig {
         self.idle_timeout = timeout;
         self
     }
+
+    /// Set Enhanced RTMP mode.
+    ///
+    /// - `Auto`: Negotiate E-RTMP if client supports it (default)
+    /// - `LegacyOnly`: Use legacy RTMP only
+    /// - `EnhancedOnly`: Require E-RTMP, reject legacy clients
+    pub fn enhanced_rtmp(mut self, mode: EnhancedRtmpMode) -> Self {
+        self.enhanced_rtmp = mode;
+        self
+    }
+
+    /// Set Enhanced RTMP server capabilities.
+    pub fn enhanced_capabilities(mut self, caps: EnhancedServerCapabilities) -> Self {
+        self.enhanced_capabilities = caps;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +256,7 @@ mod tests {
         assert_eq!(config.peer_bandwidth, DEFAULT_PEER_BANDWIDTH);
         assert!(config.tcp_nodelay);
         assert!(config.gop_buffer_enabled);
+        assert_eq!(config.enhanced_rtmp, EnhancedRtmpMode::Auto);
     }
 
     #[test]
@@ -215,5 +335,112 @@ mod tests {
         assert_eq!(config.connection_timeout, Duration::from_secs(5));
         assert_eq!(config.idle_timeout, Duration::from_secs(30));
         assert!(!config.gop_buffer_enabled);
+    }
+
+    #[test]
+    fn test_enhanced_rtmp_mode() {
+        let config = ServerConfig::default().enhanced_rtmp(EnhancedRtmpMode::EnhancedOnly);
+        assert_eq!(config.enhanced_rtmp, EnhancedRtmpMode::EnhancedOnly);
+
+        let config = ServerConfig::default().enhanced_rtmp(EnhancedRtmpMode::LegacyOnly);
+        assert_eq!(config.enhanced_rtmp, EnhancedRtmpMode::LegacyOnly);
+    }
+
+    #[test]
+    fn test_enhanced_server_capabilities_default() {
+        let caps = EnhancedServerCapabilities::default();
+
+        assert!(!caps.reconnect);
+        assert!(!caps.multitrack);
+        assert!(caps.modex);
+        assert!(!caps.video_codecs.is_empty());
+        assert!(!caps.audio_codecs.is_empty());
+
+        // Check default video codecs
+        assert!(caps
+            .video_codecs
+            .iter()
+            .any(|(c, _)| *c == VideoFourCc::Avc));
+        assert!(caps
+            .video_codecs
+            .iter()
+            .any(|(c, _)| *c == VideoFourCc::Hevc));
+        assert!(caps
+            .video_codecs
+            .iter()
+            .any(|(c, _)| *c == VideoFourCc::Av1));
+
+        // Check default audio codecs
+        assert!(caps
+            .audio_codecs
+            .iter()
+            .any(|(c, _)| *c == AudioFourCc::Aac));
+        assert!(caps
+            .audio_codecs
+            .iter()
+            .any(|(c, _)| *c == AudioFourCc::Opus));
+    }
+
+    #[test]
+    fn test_enhanced_server_capabilities_minimal() {
+        let caps = EnhancedServerCapabilities::minimal();
+
+        assert!(!caps.reconnect);
+        assert!(!caps.multitrack);
+        assert!(caps.modex);
+        assert!(caps.video_codecs.is_empty());
+        assert!(caps.audio_codecs.is_empty());
+    }
+
+    #[test]
+    fn test_enhanced_server_capabilities_builder() {
+        let caps = EnhancedServerCapabilities::minimal()
+            .with_video_codec(VideoFourCc::Hevc, FourCcCapability::full())
+            .with_audio_codec(AudioFourCc::Opus, FourCcCapability::decode())
+            .with_reconnect()
+            .with_multitrack();
+
+        assert!(caps.reconnect);
+        assert!(caps.multitrack);
+        assert_eq!(caps.video_codecs.len(), 1);
+        assert_eq!(caps.audio_codecs.len(), 1);
+
+        let (codec, cap) = &caps.video_codecs[0];
+        assert_eq!(*codec, VideoFourCc::Hevc);
+        assert!(cap.can_decode());
+        assert!(cap.can_encode());
+        assert!(cap.can_forward());
+    }
+
+    #[test]
+    fn test_enhanced_server_capabilities_to_caps_ex() {
+        let caps = EnhancedServerCapabilities::default();
+        let caps_ex = caps.to_caps_ex();
+
+        assert!(!caps_ex.supports_reconnect());
+        assert!(!caps_ex.supports_multitrack());
+        assert!(caps_ex.supports_modex());
+
+        let caps_full = EnhancedServerCapabilities::default()
+            .with_reconnect()
+            .with_multitrack();
+        let caps_ex = caps_full.to_caps_ex();
+
+        assert!(caps_ex.supports_reconnect());
+        assert!(caps_ex.supports_multitrack());
+        assert!(caps_ex.supports_modex());
+    }
+
+    #[test]
+    fn test_config_with_enhanced_capabilities() {
+        let caps = EnhancedServerCapabilities::minimal()
+            .with_video_codec(VideoFourCc::Av1, FourCcCapability::forward());
+
+        let config = ServerConfig::default()
+            .enhanced_rtmp(EnhancedRtmpMode::Auto)
+            .enhanced_capabilities(caps);
+
+        assert_eq!(config.enhanced_rtmp, EnhancedRtmpMode::Auto);
+        assert_eq!(config.enhanced_capabilities.video_codecs.len(), 1);
     }
 }
