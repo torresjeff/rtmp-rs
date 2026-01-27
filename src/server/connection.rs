@@ -788,7 +788,7 @@ impl<H: RtmpHandler> Connection<H> {
                     // Client doesn't support E-RTMP, use legacy mode
                     tracing::debug!(
                         session_id = self.state.id,
-                        "Using legacy RTMP (client doesn't support E-RTMP). The client may still send enhanced audio/video."
+                        "Using legacy RTMP (client doesn't support E-RTMP). The client may still send enhanced audio/video"
                     );
                     return Ok(None);
                 }

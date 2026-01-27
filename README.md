@@ -12,6 +12,11 @@
 
 ## Features
 
+* **Enhanced RTMP (E-RTMP) v2** - Full support for the [E-RTMP specification](https://github.com/veovera/enhanced-rtmp) with modern codec support:
+  * **Video**: HEVC (H.265), AV1, VP9, VP8 (plus legacy H.264)
+  * **Audio**: Opus, FLAC, AC-3, E-AC-3 (plus legacy AAC)
+  * Automatic capability negotiation during connect handshake
+  * Backwards compatible - falls back to legacy RTMP for older clients
 * **Async/Await** - Built on Tokio for high-performance concurrent connections
 * **Zero-Copy** - Uses `bytes::Bytes` throughout for efficient memory handling
 * **Backpressure Handling** - Slow subscribers drop video frames while audio keeps flowing, so viewers hear continuous sound instead of staring at a frozen frame
@@ -48,7 +53,7 @@ impl RtmpHandler for MyHandler {
         // Add your stream key validation here
         AuthResult::Accept
     }
-    
+
     // See RtmpHandler trait for other available callbacks
 }
 
@@ -128,7 +133,7 @@ Available callbacks:
 
 | Callback | Use Case |
 |----------|----------|
-| `on_connection` | IP blocklist, rate limiting |
+| `on_connection` | Invoked on TCP connection. IP blocklist, rate limiting |
 | `on_handshake_complete` | Post-handshake setup, before connect command, logging |
 | `on_connect` | Validate app name, parse auth tokens from tcUrl |
 | `on_disconnect` | Connection cleanup, logging |
@@ -140,9 +145,92 @@ Available callbacks:
 | `on_unpause` | Handle subscriber resume |
 | `on_metadata` | Capture stream info (resolution, bitrate, codec) |
 | `on_media_tag` | Raw FLV tag access, custom filtering |
-| `on_video_frame` | Process H.264 NALUs |
-| `on_audio_frame` | Process AAC frames |
+| `on_video_frame` | Process H.264 NALUs (legacy RTMP) |
+| `on_audio_frame` | Process AAC frames (legacy RTMP) |
+| `on_enhanced_video_frame` | Process HEVC/AV1/VP9 frames (E-RTMP) |
+| `on_enhanced_audio_frame` | Process Opus/FLAC/AC-3 frames (E-RTMP) |
 | `on_keyframe` | Track GOP boundaries |
+
+## Enhanced RTMP (E-RTMP)
+
+rtmp-rs supports [Enhanced RTMP v2](https://github.com/veovera/enhanced-rtmp) for modern codec streaming. E-RTMP is enabled by default in Auto mode, which negotiates capabilities with clients and falls back to legacy RTMP when needed.
+
+### Supported Codecs
+
+| Video | Audio |
+|-------|-------|
+| H.264/AVC | AAC |
+| H.265/HEVC | Opus |
+| AV1 | FLAC |
+| VP9 | AC-3 |
+| VP8 | E-AC-3 |
+
+### Configuration
+
+```rust
+use rtmp_rs::{ServerConfig, EnhancedRtmpMode, EnhancedServerCapabilities};
+use rtmp_rs::media::fourcc::{VideoFourCc, AudioFourCc};
+use rtmp_rs::protocol::enhanced::FourCcCapability;
+
+// Default: Auto mode with common codecs
+let config = ServerConfig::default();
+
+// Require E-RTMP (reject legacy clients)
+let config = ServerConfig::default()
+    .enhanced_rtmp(EnhancedRtmpMode::EnhancedOnly);
+
+// Legacy RTMP only (disable E-RTMP)
+let config = ServerConfig::default()
+    .enhanced_rtmp(EnhancedRtmpMode::LegacyOnly);
+
+// Custom codec configuration
+let caps = EnhancedServerCapabilities::minimal()
+    .with_video_codec(VideoFourCc::Hevc, FourCcCapability::forward())
+    .with_video_codec(VideoFourCc::Av1, FourCcCapability::forward())
+    .with_audio_codec(AudioFourCc::Opus, FourCcCapability::forward());
+
+let config = ServerConfig::default()
+    .enhanced_capabilities(caps);
+```
+
+### Processing Enhanced Media
+
+```rust
+use rtmp_rs::media::{EnhancedVideoData, EnhancedAudioData};
+use rtmp_rs::session::StreamContext;
+
+impl RtmpHandler for MyHandler {
+    async fn on_enhanced_video_frame(
+        &self,
+        ctx: &StreamContext,
+        frame: &EnhancedVideoData,
+        timestamp: u32,
+    ) {
+        match frame {
+            EnhancedVideoData::SequenceHeader { codec, config, .. } => {
+                println!("Received {} sequence header", codec);
+            }
+            EnhancedVideoData::Frame { codec, frame_type, data, .. } => {
+                if frame_type.is_keyframe() {
+                    println!("{} keyframe at {}ms", codec, timestamp);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn on_enhanced_audio_frame(
+        &self,
+        ctx: &StreamContext,
+        frame: &EnhancedAudioData,
+        timestamp: u32,
+    ) {
+        if let EnhancedAudioData::SequenceHeader { codec, .. } = frame {
+            println!("Received {} audio config", codec);
+        }
+    }
+}
+```
 
 ## Configuration
 
@@ -174,7 +262,7 @@ ffplay rtmp://localhost/live/test_key
 This repo is a Rust rewrite of my [RTMP Go server](https://github.com/torresjeff/rtmp). Almost all of the code in this Rust version was written by AI (Claude Opus 4.5).
 
 I recently had an idea that required an RTMP server, so I used it as an excuse to write some Rust and try out some agentic programming. This repo is partly an experiment to see how far I could get by vibecoding the entire thing with Claude Code. The answer? **Far!**
- 
+
 The whole thing took around 8 hours. It probably could have been faster if I auto-accepted edits without reading the code, but I like to review everything the agent generates. I started with Plan Mode to define the requirements, then moved on to implementation.
 
 That said, there was a tricky timestamp bug that caused audio/video stuttering, and Claude kept hallucinating answers instead of helping. After a deep-dive on my own, I found the root cause. I also noticed some parts of the code that could be improved, but I decided to keep things as-is for now. Any future improvements I'll have Claude handle.

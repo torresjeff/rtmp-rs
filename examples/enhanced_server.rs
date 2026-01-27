@@ -1,6 +1,7 @@
 //! Enhanced RTMP (E-RTMP) server example
 //!
 //! Demonstrates E-RTMP capability negotiation with modern codec support.
+//! You can read more about E-RTMP here: https://github.com/veovera/enhanced-rtmp
 //!
 //! Run with: cargo run --example enhanced_server
 //!
@@ -20,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rtmp_rs::amf::AmfValue;
-use rtmp_rs::media::{AacData, FlvTag, H264Data};
+use rtmp_rs::media::{AacData, EnhancedAudioData, EnhancedVideoData, FlvTag, H264Data};
 use rtmp_rs::protocol::enhanced::CapsEx;
 use rtmp_rs::protocol::message::{ConnectParams, PublishParams};
 use rtmp_rs::server::handler::{AuthResult, MediaDeliveryMode, RtmpHandler};
@@ -144,12 +145,23 @@ impl RtmpHandler for EnhancedHandler {
         true
     }
 
+    // ==========================================================================
+    // Legacy callbacks (FLV format)
+    //
+    // Called when the client sends video/audio using the legacy FLV tag format:
+    // - Video: CodecID in lower 4 bits (7 = H.264/AVC)
+    // - Audio: SoundFormat in upper 4 bits (10 = AAC)
+    //
+    // This is the traditional RTMP format used by older clients and when
+    // streaming H.264/AAC content, even from modern clients like OBS.
+    // ==========================================================================
+
     async fn on_video_frame(&self, ctx: &StreamContext, frame: &H264Data, _timestamp: u32) {
         self.video_frames.fetch_add(1, Ordering::Relaxed);
 
         if let H264Data::SequenceHeader(config) = frame {
             println!(
-                "[{}] Video: {} profile, level {}",
+                "[{}] Video (legacy): H.264 {} profile, level {}",
                 ctx.session.session_id,
                 config.profile_name(),
                 config.level_string()
@@ -162,12 +174,77 @@ impl RtmpHandler for EnhancedHandler {
 
         if let AacData::SequenceHeader(config) = frame {
             println!(
-                "[{}] Audio: {:?}, {} Hz, {} channels",
+                "[{}] Audio (legacy): {:?}, {} Hz, {} channels",
                 ctx.session.session_id,
                 config.profile(),
                 config.sampling_frequency,
                 config.channels()
             );
+        }
+    }
+
+    // ==========================================================================
+    // Enhanced RTMP callbacks (ExVideoTagHeader / ExAudioTagHeader format)
+    //
+    // Called when the client sends video/audio using the E-RTMP format:
+    // - Video: Bit 7 set (0x80), FourCC codec identifier (hvc1, av01, vp09)
+    // - Audio: SoundFormat=9, FourCC codec identifier (Opus, fLaC, ac-3)
+    //
+    // This format is used for modern codecs (HEVC, AV1, VP9, Opus, FLAC, etc.)
+    // that aren't supported by the legacy FLV format. OBS 30+ uses this when
+    // streaming HEVC or AV1, even without explicit E-RTMP negotiation in the
+    // connect command - the format is self-describing at the packet level.
+    // ==========================================================================
+
+    async fn on_enhanced_video_frame(
+        &self,
+        ctx: &StreamContext,
+        frame: &EnhancedVideoData,
+        _timestamp: u32,
+    ) {
+        self.video_frames.fetch_add(1, Ordering::Relaxed);
+
+        match frame {
+            EnhancedVideoData::SequenceHeader { codec, .. } => {
+                println!(
+                    "[{}] Video (E-RTMP): {} sequence header",
+                    ctx.session.session_id,
+                    codec.as_fourcc_str()
+                );
+            }
+            EnhancedVideoData::Frame {
+                codec, frame_type, ..
+            } if frame_type.is_keyframe() => {
+                // Only log first keyframe to avoid spam
+                if self.video_frames.load(Ordering::Relaxed) == 1 {
+                    println!(
+                        "[{}] Video (E-RTMP): {} keyframe",
+                        ctx.session.session_id,
+                        codec.as_fourcc_str()
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn on_enhanced_audio_frame(
+        &self,
+        ctx: &StreamContext,
+        frame: &EnhancedAudioData,
+        _timestamp: u32,
+    ) {
+        self.audio_frames.fetch_add(1, Ordering::Relaxed);
+
+        match frame {
+            EnhancedAudioData::SequenceHeader { codec, .. } => {
+                println!(
+                    "[{}] Audio (E-RTMP): {} sequence header",
+                    ctx.session.session_id,
+                    codec.as_fourcc_str()
+                );
+            }
+            _ => {}
         }
     }
 

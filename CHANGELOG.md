@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-01-27
+
+### Added
+
+- **Enhanced RTMP (E-RTMP) v2 Support** - Full implementation of the [E-RTMP specification](https://github.com/veovera/enhanced-rtmp) for modern codec streaming.
+
+#### Modern Codec Support
+
+- **Video codecs**: HEVC (H.265), AV1, VP9, VP8 in addition to legacy H.264/AVC
+- **Audio codecs**: Opus, FLAC, AC-3, E-AC-3, MP3 in addition to legacy AAC
+- FOURCC-based codec identification for extensibility
+
+#### Capability Negotiation
+
+- Server and client negotiate supported codecs during the connect handshake
+- Backwards compatible - automatically falls back to legacy RTMP for older clients
+- Self-describing packet format allows HEVC/AV1 streaming even without explicit negotiation
+
+#### New Types
+
+- `EnhancedRtmpMode` - Control E-RTMP behavior: `Auto` (default), `LegacyOnly`, `EnhancedOnly`
+- `EnhancedServerCapabilities` - Configure server-side codec and feature support
+- `EnhancedClientCapabilities` - Configure client-side codec and feature support
+- `EnhancedCapabilities` - Negotiated capabilities for a session
+- `CapsEx` - Extended capability flags (reconnect, multitrack, ModEx, nanosecond timestamps)
+- `FourCcCapability` - Codec capability flags (decode, encode, forward)
+- `VideoFunctionFlags` - Video function flags (client seek support)
+- `VideoFourCc` - Video codec identifiers (Avc, Hevc, Av1, Vp9, Vp8)
+- `AudioFourCc` - Audio codec identifiers (Aac, Opus, Flac, Ac3, Eac3, Mp3)
+- `FourCC` - Generic four-character code for codec identification
+- `EnhancedVideoData` - Parsed enhanced video frames with codec info
+- `EnhancedAudioData` - Parsed enhanced audio frames with codec info
+- `VideoPacketType` - Enhanced video packet types (SequenceStart, CodedFrames, etc.)
+- `AudioPacketType` - Enhanced audio packet types
+- `ExVideoFrameType` - Enhanced video frame types (Keyframe, InterFrame, etc.)
+- `AvMultitrackType` - Multitrack container types
+- `AudioChannelOrder` - Multichannel audio ordering schemes
+- `VideoTrack`, `AudioTrack` - Individual tracks in multitrack containers
+- `EnhancedVideoTrackData`, `EnhancedAudioTrackData` - Track-level data types
+
+#### New Handler Callbacks
+
+- `on_enhanced_video_frame` - Called for E-RTMP video (HEVC, AV1, VP9, VP8)
+- `on_enhanced_audio_frame` - Called for E-RTMP audio (Opus, FLAC, AC-3, E-AC-3)
+
+#### New Configuration Options
+
+- `ServerConfig::enhanced_rtmp()` - Set E-RTMP mode
+- `ServerConfig::enhanced_capabilities()` - Configure server codec support
+- `ClientConfig::enhanced_rtmp()` - Set E-RTMP mode for client
+- `ClientConfig::enhanced_capabilities()` - Configure client codec support
+
+#### New Example
+
+- `enhanced_server` - Demonstrates E-RTMP capability negotiation and modern codec handling
+
+### Notes
+
+- E-RTMP is enabled by default in `Auto` mode, which negotiates with clients and falls back gracefully
+- The `ExVideoTagHeader` and `ExAudioTagHeader` formats are self-describing, so modern codecs work even when capability negotiation doesn't occur (e.g., OBS 30+ streaming HEVC)
+- Legacy `on_video_frame` and `on_audio_frame` callbacks continue to work for H.264/AAC streams
+- For relay servers, use `FourCcCapability::forward()` to indicate passthrough support without transcoding
+
 ## [0.4.0] - 2026-01-24
 
 ### Added
@@ -161,6 +224,7 @@ impl RtmpHandler for MyHandler {
 - Zero-copy design using `bytes::Bytes`
 - Examples: `simple_server`, `puller`
 
+[0.5.0]: https://github.com/torresjeff/rtmp-rs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/torresjeff/rtmp-rs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/torresjeff/rtmp-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torresjeff/rtmp-rs/compare/v0.1.4...v0.2.0
