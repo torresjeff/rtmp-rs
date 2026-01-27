@@ -13,8 +13,9 @@ use crate::amf::AmfValue;
 use crate::error::{Error, Result};
 use crate::protocol::chunk::{ChunkDecoder, ChunkEncoder, RtmpChunk};
 use crate::protocol::constants::*;
+use crate::protocol::enhanced::{EnhancedCapabilities, EnhancedRtmpMode};
 use crate::protocol::handshake::{Handshake, HandshakeRole};
-use crate::protocol::message::{Command, RtmpMessage};
+use crate::protocol::message::{Command, ConnectParams, RtmpMessage};
 
 use super::config::{ClientConfig, ParsedUrl};
 
@@ -29,6 +30,8 @@ pub struct RtmpConnector {
     chunk_decoder: ChunkDecoder,
     chunk_encoder: ChunkEncoder,
     stream_id: u32,
+    /// Negotiated E-RTMP capabilities (if E-RTMP is active)
+    enhanced_capabilities: Option<EnhancedCapabilities>,
 }
 
 impl RtmpConnector {
@@ -61,6 +64,7 @@ impl RtmpConnector {
             chunk_decoder: ChunkDecoder::new(),
             chunk_encoder: ChunkEncoder::new(),
             stream_id: 0,
+            enhanced_capabilities: None,
         };
 
         connector.do_handshake().await?;
@@ -132,6 +136,15 @@ impl RtmpConnector {
         obj.insert("videoCodecs".to_string(), AmfValue::Number(252.0));
         obj.insert("videoFunction".to_string(), AmfValue::Number(1.0));
 
+        // Add E-RTMP fields if not in LegacyOnly mode
+        let client_caps = if !matches!(self.config.enhanced_rtmp, EnhancedRtmpMode::LegacyOnly) {
+            let caps = self.config.enhanced_capabilities.to_enhanced_capabilities();
+            self.add_ertmp_fields(&mut obj, &caps);
+            Some(caps)
+        } else {
+            None
+        };
+
         let cmd = Command {
             name: CMD_CONNECT.to_string(),
             transaction_id: 1.0,
@@ -147,7 +160,8 @@ impl RtmpConnector {
             let msg = self.read_message().await?;
             match msg {
                 RtmpMessage::Command(cmd) if cmd.name == CMD_RESULT => {
-                    // Connect successful
+                    // Parse server's E-RTMP response
+                    self.handle_connect_result(&cmd, client_caps.as_ref())?;
                     break;
                 }
                 RtmpMessage::Command(cmd) if cmd.name == CMD_ERROR => {
@@ -167,6 +181,101 @@ impl RtmpConnector {
         self.chunk_encoder.set_chunk_size(RECOMMENDED_CHUNK_SIZE);
         self.send_message(&RtmpMessage::SetChunkSize(RECOMMENDED_CHUNK_SIZE))
             .await?;
+
+        Ok(())
+    }
+
+    /// Add E-RTMP fields to the connect command object.
+    fn add_ertmp_fields(&self, obj: &mut HashMap<String, AmfValue>, caps: &EnhancedCapabilities) {
+        // Add capsEx
+        obj.insert(
+            "capsEx".to_string(),
+            AmfValue::Number(caps.caps_ex.bits() as f64),
+        );
+
+        // Add fourCcList for compatibility (older E-RTMP implementations)
+        let mut fourcc_list: Vec<AmfValue> = Vec::new();
+
+        // Add video codecs to fourCcList
+        for codec in caps.video_codecs.keys() {
+            fourcc_list.push(AmfValue::String(codec.as_fourcc_str().to_string()));
+        }
+
+        // Add audio codecs to fourCcList
+        for codec in caps.audio_codecs.keys() {
+            fourcc_list.push(AmfValue::String(codec.as_fourcc_str().to_string()));
+        }
+
+        if !fourcc_list.is_empty() {
+            obj.insert("fourCcList".to_string(), AmfValue::Array(fourcc_list));
+        }
+
+        // Add videoFourCcInfoMap (modern E-RTMP)
+        if !caps.video_codecs.is_empty() {
+            let mut video_map: HashMap<String, AmfValue> = HashMap::new();
+            for (codec, capability) in &caps.video_codecs {
+                video_map.insert(
+                    codec.as_fourcc_str().to_string(),
+                    AmfValue::Number(capability.bits() as f64),
+                );
+            }
+            obj.insert(
+                "videoFourCcInfoMap".to_string(),
+                AmfValue::Object(video_map),
+            );
+        }
+
+        // Add audioFourCcInfoMap (modern E-RTMP)
+        if !caps.audio_codecs.is_empty() {
+            let mut audio_map: HashMap<String, AmfValue> = HashMap::new();
+            for (codec, capability) in &caps.audio_codecs {
+                audio_map.insert(
+                    codec.as_fourcc_str().to_string(),
+                    AmfValue::Number(capability.bits() as f64),
+                );
+            }
+            obj.insert(
+                "audioFourCcInfoMap".to_string(),
+                AmfValue::Object(audio_map),
+            );
+        }
+    }
+
+    /// Handle connect result and parse E-RTMP capabilities from server response.
+    fn handle_connect_result(
+        &mut self,
+        cmd: &Command,
+        client_caps: Option<&EnhancedCapabilities>,
+    ) -> Result<()> {
+        // Parse server's response for E-RTMP fields
+        let server_params = ConnectParams::from_amf(&cmd.command_object);
+
+        if server_params.has_enhanced_rtmp() {
+            // Server responded with E-RTMP capabilities
+            let server_caps = server_params.to_enhanced_capabilities();
+
+            // Intersect with our client caps to get final negotiated caps
+            let negotiated = if let Some(client) = client_caps {
+                client.intersect(&server_caps)
+            } else {
+                server_caps
+            };
+
+            if negotiated.enabled {
+                tracing::debug!(
+                    video_codecs = negotiated.video_codecs.len(),
+                    audio_codecs = negotiated.audio_codecs.len(),
+                    caps_ex = negotiated.caps_ex.bits(),
+                    "E-RTMP negotiated with server"
+                );
+                self.enhanced_capabilities = Some(negotiated);
+            }
+        } else if matches!(self.config.enhanced_rtmp, EnhancedRtmpMode::EnhancedOnly) {
+            // We required E-RTMP but server doesn't support it
+            return Err(Error::Rejected(
+                "Server does not support Enhanced RTMP".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -300,5 +409,18 @@ impl RtmpConnector {
     /// Get the stream ID
     pub fn stream_id(&self) -> u32 {
         self.stream_id
+    }
+
+    /// Check if E-RTMP is active for this connection
+    pub fn is_enhanced_rtmp(&self) -> bool {
+        self.enhanced_capabilities
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
+    }
+
+    /// Get the negotiated E-RTMP capabilities
+    pub fn enhanced_capabilities(&self) -> Option<&EnhancedCapabilities> {
+        self.enhanced_capabilities.as_ref()
     }
 }

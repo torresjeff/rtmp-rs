@@ -153,6 +153,29 @@ impl EnhancedServerCapabilities {
         }
         caps
     }
+
+    /// Convert to EnhancedCapabilities for negotiation.
+    pub fn to_enhanced_capabilities(&self) -> crate::protocol::enhanced::EnhancedCapabilities {
+        use crate::protocol::enhanced::EnhancedCapabilities;
+
+        let mut caps = EnhancedCapabilities {
+            enabled: true,
+            caps_ex: self.to_caps_ex(),
+            video_codecs: std::collections::HashMap::new(),
+            audio_codecs: std::collections::HashMap::new(),
+            video_function: crate::protocol::enhanced::VideoFunctionFlags::empty(),
+        };
+
+        for (codec, capability) in &self.video_codecs {
+            caps.video_codecs.insert(*codec, *capability);
+        }
+
+        for (codec, capability) in &self.audio_codecs {
+            caps.audio_codecs.insert(*codec, *capability);
+        }
+
+        caps
+    }
 }
 
 impl Default for ServerConfig {

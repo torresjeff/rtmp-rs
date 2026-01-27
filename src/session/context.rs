@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::protocol::enhanced::EnhancedCapabilities;
 use crate::protocol::message::ConnectParams;
 use crate::protocol::quirks::EncoderType;
 use crate::stats::SessionStats;
@@ -31,6 +32,9 @@ pub struct SessionContext {
     /// Connect parameters (if available)
     pub connect_params: Option<Arc<ConnectParams>>,
 
+    /// Negotiated E-RTMP capabilities (if E-RTMP is active)
+    pub enhanced_capabilities: Option<EnhancedCapabilities>,
+
     /// Current session statistics
     pub stats: SessionStats,
 }
@@ -44,6 +48,7 @@ impl SessionContext {
             app: String::new(),
             encoder_type: EncoderType::Unknown,
             connect_params: None,
+            enhanced_capabilities: None,
             stats: SessionStats::default(),
         }
     }
@@ -53,6 +58,21 @@ impl SessionContext {
         self.app = params.app.clone();
         self.encoder_type = encoder_type;
         self.connect_params = Some(Arc::new(params));
+    }
+
+    /// Set negotiated E-RTMP capabilities
+    pub fn with_enhanced_capabilities(&mut self, caps: EnhancedCapabilities) {
+        if caps.enabled {
+            self.enhanced_capabilities = Some(caps);
+        }
+    }
+
+    /// Check if E-RTMP is active for this session
+    pub fn is_enhanced_rtmp(&self) -> bool {
+        self.enhanced_capabilities
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
     }
 
     /// Get the TC URL if available

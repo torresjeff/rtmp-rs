@@ -25,9 +25,11 @@ use crate::media::flv::FlvTag;
 use crate::media::{AacData, H264Data};
 use crate::protocol::chunk::{ChunkDecoder, ChunkEncoder, RtmpChunk};
 use crate::protocol::constants::*;
+use crate::protocol::enhanced::EnhancedRtmpMode;
 use crate::protocol::handshake::{Handshake, HandshakeRole};
 use crate::protocol::message::{
-    Command, ConnectParams, DataMessage, PlayParams, PublishParams, RtmpMessage, UserControlEvent,
+    Command, ConnectParams, ConnectResponseBuilder, DataMessage, PlayParams, PublishParams,
+    RtmpMessage, UserControlEvent,
 };
 use crate::protocol::quirks::EncoderType;
 use crate::server::config::ServerConfig;
@@ -614,6 +616,10 @@ impl<H: RtmpHandler> Connection<H> {
             .map(EncoderType::from_flash_ver)
             .unwrap_or(EncoderType::Unknown);
 
+        // E-RTMP capability negotiation
+        let client_has_ertmp = params.has_enhanced_rtmp();
+        let negotiated_caps = self.negotiate_enhanced_rtmp(&params)?;
+
         // Call handler
         let result = self.handler.on_connect(&self.context, &params).await;
 
@@ -621,6 +627,11 @@ impl<H: RtmpHandler> Connection<H> {
             AuthResult::Accept => {
                 self.state.on_connect(params.clone(), encoder_type);
                 self.context.with_connect(params, encoder_type);
+
+                // Store negotiated E-RTMP capabilities
+                if let Some(ref caps) = negotiated_caps {
+                    self.context.with_enhanced_capabilities(caps.clone());
+                }
 
                 // Send window ack size
                 self.send_window_ack_size(self.config.window_ack_size)
@@ -633,12 +644,15 @@ impl<H: RtmpHandler> Connection<H> {
                 self.send_user_control(UserControlEvent::StreamBegin(0))
                     .await?;
 
-                // Send connect result
-                self.send_connect_result(cmd.transaction_id).await?;
+                // Send connect result with E-RTMP capabilities if negotiated
+                self.send_connect_result_with_ertmp(cmd.transaction_id, negotiated_caps.as_ref())
+                    .await?;
 
                 tracing::info!(
                     session_id = self.state.id,
                     app = self.context.app,
+                    enhanced_rtmp = client_has_ertmp
+                        && negotiated_caps.as_ref().map(|c| c.enabled).unwrap_or(false),
                     "Connected"
                 );
             }
@@ -653,6 +667,88 @@ impl<H: RtmpHandler> Connection<H> {
         }
 
         Ok(())
+    }
+
+    /// Negotiate E-RTMP capabilities with client.
+    ///
+    /// Returns the negotiated capabilities if E-RTMP is active, or None for legacy mode.
+    fn negotiate_enhanced_rtmp(
+        &self,
+        params: &ConnectParams,
+    ) -> Result<Option<crate::protocol::enhanced::EnhancedCapabilities>> {
+        let client_has_ertmp = params.has_enhanced_rtmp();
+
+        match self.config.enhanced_rtmp {
+            EnhancedRtmpMode::LegacyOnly => {
+                // Server configured for legacy only - ignore client E-RTMP fields
+                tracing::debug!(
+                    session_id = self.state.id,
+                    "E-RTMP disabled (LegacyOnly mode)"
+                );
+                Ok(None)
+            }
+            EnhancedRtmpMode::EnhancedOnly => {
+                if !client_has_ertmp {
+                    // Client doesn't support E-RTMP but server requires it
+                    tracing::warn!(
+                        session_id = self.state.id,
+                        "Rejecting legacy client (EnhancedOnly mode)"
+                    );
+                    return Err(Error::Rejected(
+                        "Server requires Enhanced RTMP support".into(),
+                    ));
+                }
+
+                // Negotiate capabilities
+                let server_caps = self.config.enhanced_capabilities.to_enhanced_capabilities();
+                let client_caps = params.to_enhanced_capabilities();
+                let negotiated = server_caps.intersect(&client_caps);
+
+                tracing::debug!(
+                    session_id = self.state.id,
+                    video_codecs = negotiated.video_codecs.len(),
+                    audio_codecs = negotiated.audio_codecs.len(),
+                    caps_ex = negotiated.caps_ex.bits(),
+                    "E-RTMP negotiated (EnhancedOnly mode)"
+                );
+
+                Ok(Some(negotiated))
+            }
+            EnhancedRtmpMode::Auto => {
+                if !client_has_ertmp {
+                    // Client doesn't support E-RTMP, use legacy mode
+                    tracing::debug!(
+                        session_id = self.state.id,
+                        "Using legacy RTMP (client doesn't support E-RTMP)"
+                    );
+                    return Ok(None);
+                }
+
+                // Negotiate capabilities
+                let server_caps = self.config.enhanced_capabilities.to_enhanced_capabilities();
+                let client_caps = params.to_enhanced_capabilities();
+                let negotiated = server_caps.intersect(&client_caps);
+
+                if !negotiated.enabled {
+                    // No common capabilities, fall back to legacy
+                    tracing::debug!(
+                        session_id = self.state.id,
+                        "Falling back to legacy RTMP (no common E-RTMP capabilities)"
+                    );
+                    return Ok(None);
+                }
+
+                tracing::debug!(
+                    session_id = self.state.id,
+                    video_codecs = negotiated.video_codecs.len(),
+                    audio_codecs = negotiated.audio_codecs.len(),
+                    caps_ex = negotiated.caps_ex.bits(),
+                    "E-RTMP negotiated (Auto mode)"
+                );
+
+                Ok(Some(negotiated))
+            }
+        }
     }
 
     /// Handle createStream command
@@ -1336,32 +1432,24 @@ impl<H: RtmpHandler> Connection<H> {
         Ok(())
     }
 
-    async fn send_connect_result(&mut self, transaction_id: f64) -> Result<()> {
-        let mut props = HashMap::new();
-        props.insert(
-            "fmsVer".to_string(),
-            AmfValue::String("FMS/3,5,7,7009".into()),
-        );
-        props.insert("capabilities".to_string(), AmfValue::Number(31.0));
-        props.insert("mode".to_string(), AmfValue::Number(1.0));
+    async fn send_connect_result_with_ertmp(
+        &mut self,
+        transaction_id: f64,
+        negotiated_caps: Option<&crate::protocol::enhanced::EnhancedCapabilities>,
+    ) -> Result<()> {
+        // Build connect response using the builder
+        let mut builder = ConnectResponseBuilder::new()
+            .fms_ver("FMS/3,5,7,7009")
+            .capabilities(31);
 
-        let mut info = HashMap::new();
-        info.insert("level".to_string(), AmfValue::String("status".into()));
-        info.insert(
-            "code".to_string(),
-            AmfValue::String(NC_CONNECT_SUCCESS.into()),
-        );
-        info.insert(
-            "description".to_string(),
-            AmfValue::String("Connection succeeded".into()),
-        );
-        info.insert("objectEncoding".to_string(), AmfValue::Number(0.0));
+        // Add E-RTMP capabilities if negotiated
+        if let Some(caps) = negotiated_caps {
+            if caps.enabled {
+                builder = builder.enhanced_capabilities(caps);
+            }
+        }
 
-        let result = Command::result(
-            transaction_id,
-            AmfValue::Object(props),
-            AmfValue::Object(info),
-        );
+        let result = builder.build(transaction_id);
 
         self.send_command(CSID_COMMAND, 0, &result).await
     }
