@@ -12,10 +12,17 @@ exclude = [
     "assets/*",
 ]
 
+[features]
+default = []
+tls = ["tokio-rustls", "rustls", "webpki-roots"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 tracing = "0.1"
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

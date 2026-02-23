@@ -8,6 +8,7 @@ pub mod config;
 pub mod connector;
 pub mod publisher;
 pub mod puller;
+pub mod stream;
 
 pub use config::ClientConfig;
 pub use connector::RtmpConnector;
