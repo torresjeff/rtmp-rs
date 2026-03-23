@@ -93,14 +93,38 @@ impl RtmpPublisher {
         Ok(())
     }
 
-    /// Send an AAC audio frame.
+    /// Send an audio frame.
     ///
-    /// The `data` should be the raw FLV audio tag body:
-    /// - First byte: audio tag header (e.g., `0xAF` for AAC, 44100Hz, stereo, 16-bit)
-    /// - For sequence header: `0xAF 0x00` + AudioSpecificConfig
-    /// - For raw AAC frames: `0xAF 0x01` + raw AAC data (no ADTS)
+    /// The `data` should be the complete FLV audio tag body, including any
+    /// codec-specific headers. The caller is responsible for constructing
+    /// the correct payload for their chosen codec.
     ///
     /// `timestamp` is in milliseconds.
+    ///
+    /// # AAC Example
+    ///
+    /// For AAC, the FLV audio tag body is structured as:
+    /// - First byte: audio tag header (`0xAF` = AAC, 44100Hz, stereo, 16-bit)
+    /// - Second byte: AAC packet type (`0x00` = sequence header, `0x01` = raw)
+    /// - Remaining bytes: codec data
+    ///
+    /// ```no_run
+    /// # use bytes::Bytes;
+    /// # async fn example(publisher: &mut rtmp_rs::client::RtmpPublisher) -> rtmp_rs::error::Result<()> {
+    /// // Send AAC sequence header (AudioSpecificConfig)
+    /// let audio_specific_config: &[u8] = &[0x12, 0x10]; // example config
+    /// let mut header = vec![0xAF, 0x00];
+    /// header.extend_from_slice(audio_specific_config);
+    /// publisher.send_audio(Bytes::from(header), 0).await?;
+    ///
+    /// // Send raw AAC frame
+    /// let raw_aac: &[u8] = &[/* raw AAC data */];
+    /// let mut frame = vec![0xAF, 0x01];
+    /// frame.extend_from_slice(raw_aac);
+    /// publisher.send_audio(Bytes::from(frame), timestamp_ms).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_audio(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
         let connector = self
             .connector
@@ -110,42 +134,6 @@ impl RtmpPublisher {
             )))?;
 
         connector.send_audio_data(data, timestamp).await
-    }
-
-    /// Send the AAC sequence header.
-    ///
-    /// This must be sent before any audio frames. It contains the
-    /// AudioSpecificConfig that the server needs to decode the stream.
-    ///
-    /// `audio_specific_config` is typically 2 bytes describing the AAC profile,
-    /// sample rate, and channel configuration.
-    pub async fn send_aac_sequence_header(
-        &mut self,
-        audio_specific_config: &[u8],
-    ) -> Result<()> {
-        let mut data = Vec::with_capacity(2 + audio_specific_config.len());
-        // FLV audio tag header: AAC (0xA=10 shifted left 4), 44100Hz (3<<2), stereo (1<<1), 16-bit (1)
-        // = 0xAF
-        data.push(0xAF);
-        // AAC packet type: sequence header
-        data.push(0x00);
-        data.extend_from_slice(audio_specific_config);
-
-        self.send_audio(Bytes::from(data), 0).await
-    }
-
-    /// Send a raw AAC audio frame (without ADTS header).
-    ///
-    /// `timestamp` is in milliseconds.
-    pub async fn send_aac_raw(&mut self, raw_aac: Bytes, timestamp: u32) -> Result<()> {
-        let mut data = Vec::with_capacity(2 + raw_aac.len());
-        // FLV audio tag header: AAC
-        data.push(0xAF);
-        // AAC packet type: raw
-        data.push(0x01);
-        data.extend_from_slice(&raw_aac);
-
-        self.send_audio(Bytes::from(data), timestamp).await
     }
 
     /// Disconnect from the server.
