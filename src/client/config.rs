@@ -198,14 +198,20 @@ impl ClientConfig {
 
     /// Parse URL into components
     pub fn parse_url(&self) -> Option<ParsedUrl> {
-        // rtmp://host[:port]/app[/stream]
-        let url = self.url.strip_prefix("rtmp://")?;
+        // rtmp://host[:port]/app[/stream] or rtmps://host[:port]/app[/stream]
+        let (url, tls, default_port) = if let Some(rest) = self.url.strip_prefix("rtmps://") {
+            (rest, true, 443u16)
+        } else if let Some(rest) = self.url.strip_prefix("rtmp://") {
+            (rest, false, 1935u16)
+        } else {
+            return None;
+        };
 
         let (host_port, path) = url.split_once('/')?;
         let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
             (h.to_string(), p.parse().ok()?)
         } else {
-            (host_port.to_string(), 1935)
+            (host_port.to_string(), default_port)
         };
 
         let (app, stream_key) = if let Some((a, s)) = path.split_once('/') {
@@ -219,6 +225,7 @@ impl ClientConfig {
             port,
             app,
             stream_key,
+            tls,
         })
     }
 }
@@ -230,6 +237,8 @@ pub struct ParsedUrl {
     pub port: u16,
     pub app: String,
     pub stream_key: Option<String>,
+    /// Whether TLS should be used (rtmps://)
+    pub tls: bool,
 }
 
 #[cfg(test)]
@@ -244,6 +253,7 @@ mod tests {
         assert_eq!(parsed.port, 1935);
         assert_eq!(parsed.app, "live");
         assert_eq!(parsed.stream_key, Some("test".into()));
+        assert!(!parsed.tls);
 
         let config = ClientConfig::new("rtmp://example.com:1936/app");
         let parsed = config.parse_url().unwrap();
@@ -251,6 +261,24 @@ mod tests {
         assert_eq!(parsed.port, 1936);
         assert_eq!(parsed.app, "app");
         assert_eq!(parsed.stream_key, None);
+        assert!(!parsed.tls);
+    }
+
+    #[test]
+    fn test_rtmps_url_parsing() {
+        let config = ClientConfig::new("rtmps://example.com/live/stream");
+        let parsed = config.parse_url().unwrap();
+        assert_eq!(parsed.host, "example.com");
+        assert_eq!(parsed.port, 443);
+        assert_eq!(parsed.app, "live");
+        assert_eq!(parsed.stream_key, Some("stream".into()));
+        assert!(parsed.tls);
+
+        let config = ClientConfig::new("rtmps://example.com:8443/live/key");
+        let parsed = config.parse_url().unwrap();
+        assert_eq!(parsed.host, "example.com");
+        assert_eq!(parsed.port, 8443);
+        assert!(parsed.tls);
     }
 
     #[test]

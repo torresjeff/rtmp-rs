@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use super::stream::RtmpStream;
+
 use crate::amf::AmfValue;
 use crate::error::{Error, Result};
 use crate::protocol::chunk::{ChunkDecoder, ChunkEncoder, RtmpChunk};
@@ -23,8 +25,8 @@ use super::config::{ClientConfig, ParsedUrl};
 pub struct RtmpConnector {
     config: ClientConfig,
     parsed_url: ParsedUrl,
-    reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
-    writer: BufWriter<tokio::io::WriteHalf<TcpStream>>,
+    reader: BufReader<tokio::io::ReadHalf<RtmpStream>>,
+    writer: BufWriter<tokio::io::WriteHalf<RtmpStream>>,
     read_buf: BytesMut,
     write_buf: BytesMut,
     chunk_decoder: ChunkDecoder,
@@ -52,7 +54,23 @@ impl RtmpConnector {
             socket.set_nodelay(true)?;
         }
 
-        let (read_half, write_half) = tokio::io::split(socket);
+        let stream = if parsed_url.tls {
+            #[cfg(feature = "tls")]
+            {
+                let tls_stream = Self::wrap_tls(socket, &parsed_url.host).await?;
+                RtmpStream::Tls(tls_stream)
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                return Err(Error::Config(
+                    "RTMPS requires the 'tls' feature to be enabled".into(),
+                ));
+            }
+        } else {
+            RtmpStream::Tcp(socket)
+        };
+
+        let (read_half, write_half) = tokio::io::split(stream);
 
         let mut connector = Self {
             config,
@@ -71,6 +89,39 @@ impl RtmpConnector {
         connector.do_connect().await?;
 
         Ok(connector)
+    }
+
+    /// Wrap a TCP stream with TLS using rustls.
+    #[cfg(feature = "tls")]
+    async fn wrap_tls(
+        socket: TcpStream,
+        host: &str,
+    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+        use std::sync::Arc;
+        use tokio_rustls::TlsConnector;
+
+        // Install the ring crypto provider if no provider has been set yet.
+        // This is required by rustls 0.23+ when using the ring feature.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| Error::Config(format!("Invalid TLS server name '{}': {}", host, e)))?;
+
+        let tls_stream = connector
+            .connect(server_name, socket)
+            .await
+            .map_err(Error::Io)?;
+
+        tracing::debug!(host, "TLS handshake completed");
+        Ok(tls_stream)
     }
 
     /// Perform handshake
@@ -354,6 +405,101 @@ impl RtmpConnector {
                 }
             }
         }
+    }
+
+    /// Start publishing a stream
+    pub async fn publish(&mut self, stream_name: &str) -> Result<()> {
+        if self.stream_id == 0 {
+            self.create_stream().await?;
+        }
+
+        // releaseStream (some servers require this)
+        let release_cmd = Command {
+            name: CMD_RELEASE_STREAM.to_string(),
+            transaction_id: 3.0,
+            command_object: AmfValue::Null,
+            arguments: vec![AmfValue::String(stream_name.to_string())],
+            stream_id: 0,
+        };
+        self.send_command(&release_cmd).await?;
+
+        // FCPublish (some servers require this)
+        let fc_cmd = Command {
+            name: CMD_FC_PUBLISH.to_string(),
+            transaction_id: 4.0,
+            command_object: AmfValue::Null,
+            arguments: vec![AmfValue::String(stream_name.to_string())],
+            stream_id: 0,
+        };
+        self.send_command(&fc_cmd).await?;
+
+        // Send publish command
+        let cmd = Command {
+            name: CMD_PUBLISH.to_string(),
+            transaction_id: 0.0,
+            command_object: AmfValue::Null,
+            arguments: vec![
+                AmfValue::String(stream_name.to_string()),
+                AmfValue::String("live".to_string()),
+            ],
+            stream_id: self.stream_id,
+        };
+        self.send_command(&cmd).await?;
+
+        // Wait for onStatus with NetStream.Publish.Start
+        loop {
+            let msg = self.read_message().await?;
+            match msg {
+                RtmpMessage::Command(status) if status.name == CMD_ON_STATUS => {
+                    if let Some(info) = status.arguments.first().and_then(|v| v.as_object()) {
+                        if let Some(code) = info.get("code").and_then(|v| v.as_str()) {
+                            if code == NS_PUBLISH_START {
+                                return Ok(());
+                            } else if code.contains("Failed")
+                                || code.contains("Error")
+                                || code == NS_PUBLISH_BAD_NAME
+                            {
+                                return Err(Error::Rejected(code.to_string()));
+                            }
+                        }
+                    }
+                }
+                RtmpMessage::Command(cmd)
+                    if cmd.name == CMD_RESULT || cmd.name == CMD_ON_FC_PUBLISH =>
+                {
+                    // Responses to releaseStream/FCPublish - ignore
+                }
+                RtmpMessage::Command(cmd) if cmd.name == CMD_ERROR => {
+                    return Err(Error::Rejected("Publish rejected".into()));
+                }
+                RtmpMessage::SetChunkSize(size) => {
+                    self.chunk_decoder.set_chunk_size(size);
+                }
+                RtmpMessage::WindowAckSize(_) | RtmpMessage::SetPeerBandwidth { .. } => {}
+                _ => {}
+            }
+        }
+    }
+
+    /// Send audio data on the published stream.
+    ///
+    /// `data` is the FLV audio tag body (header byte + payload).
+    /// `timestamp` is in milliseconds.
+    pub async fn send_audio_data(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
+        let chunk = RtmpChunk {
+            csid: CSID_AUDIO,
+            timestamp,
+            message_type: crate::protocol::constants::MSG_AUDIO,
+            stream_id: self.stream_id,
+            payload: data,
+        };
+
+        self.write_buf.clear();
+        self.chunk_encoder.encode(&chunk, &mut self.write_buf);
+        self.writer.write_all(&self.write_buf).await?;
+        self.writer.flush().await?;
+
+        Ok(())
     }
 
     /// Read the next RTMP message
