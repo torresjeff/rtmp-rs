@@ -112,8 +112,8 @@ impl RtmpPublisher {
     /// # use bytes::Bytes;
     /// # async fn example(publisher: &mut rtmp_rs::client::RtmpPublisher) -> rtmp_rs::error::Result<()> {
     /// // Send AAC sequence header (AudioSpecificConfig)
-    /// let audio_specific_config: &[u8] = &[0x12, 0x10]; // example config
-    /// let mut header = vec![0xAF, 0x00];
+    /// let audio_specific_config: &[u8] = &[0x12, 0x10]; // AAC-LC, 44.1kHz, stereo (ISO 14496-3)
+    /// let mut header = vec![0xAF, 0x00]; // FLV audio tag: AAC format, sequence header
     /// header.extend_from_slice(audio_specific_config);
     /// publisher.send_audio(Bytes::from(header), 0).await?;
     ///
@@ -121,17 +121,17 @@ impl RtmpPublisher {
     /// let raw_aac: &[u8] = &[/* raw AAC data */];
     /// let mut frame = vec![0xAF, 0x01];
     /// frame.extend_from_slice(raw_aac);
+    /// let timestamp_ms = 1024u32;
     /// publisher.send_audio(Bytes::from(frame), timestamp_ms).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn send_audio(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
-        let connector = self
-            .connector
-            .as_mut()
-            .ok_or_else(|| Error::Protocol(crate::error::ProtocolError::UnexpectedMessage(
+        let connector = self.connector.as_mut().ok_or_else(|| {
+            Error::Protocol(crate::error::ProtocolError::UnexpectedMessage(
                 "Not connected".into(),
-            )))?;
+            ))
+        })?;
 
         connector.send_audio_data(data, timestamp).await
     }
