@@ -13,6 +13,6 @@ pub mod stream;
 
 pub use config::ClientConfig;
 pub use connector::RtmpConnector;
-pub use multi_publisher::MultiPublisher;
+pub use multi_publisher::{MultiPublishEvent, MultiPublisher};
 pub use publisher::{PublishEvent, RtmpPublisher};
 pub use puller::{ClientEvent, RtmpPuller};

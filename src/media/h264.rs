@@ -312,36 +312,42 @@ impl H264Data {
 
     /// Build the FLV video tag body for this AVC data (transmux, no re-encode).
     pub fn to_flv_tag_body(&self) -> Bytes {
-        let mut body = BytesMut::new();
         match self {
             H264Data::SequenceHeader(cfg) => {
+                let mut body = BytesMut::with_capacity(5 + cfg.raw.len());
                 body.put_u8(0x17); // keyframe, AVC
                 body.put_u8(0x00); // sequence header
+                body.put_u8(0x00); // composition time = 0 (SI24)
                 body.put_u8(0x00);
                 body.put_u8(0x00);
-                body.put_u8(0x00); // composition time = 0
                 body.extend_from_slice(&cfg.raw);
+                body.freeze()
             }
             H264Data::Frame {
                 keyframe,
                 composition_time,
                 nalus,
             } => {
+                let mut body = BytesMut::with_capacity(5 + nalus.len());
                 body.put_u8(if *keyframe { 0x17 } else { 0x27 });
                 body.put_u8(0x01); // NALU
-                let ct = (*composition_time as u32).to_be_bytes();
-                body.extend_from_slice(&ct[1..]); // SI24 (signed)
+                let ct = *composition_time;
+                body.put_u8(((ct >> 16) & 0xFF) as u8); // SI24 (signed)
+                body.put_u8(((ct >> 8) & 0xFF) as u8);
+                body.put_u8((ct & 0xFF) as u8);
                 body.extend_from_slice(nalus);
+                body.freeze()
             }
             H264Data::EndOfSequence => {
+                let mut body = BytesMut::with_capacity(5);
                 body.put_u8(0x17);
                 body.put_u8(0x02); // end of sequence
                 body.put_u8(0x00);
                 body.put_u8(0x00);
                 body.put_u8(0x00);
+                body.freeze()
             }
         }
-        body.freeze()
     }
 }
 

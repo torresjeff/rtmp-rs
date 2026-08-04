@@ -5,7 +5,8 @@
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, MediaError, Result};
+use crate::media::aac::AacData;
 use crate::media::h264::H264Data;
 
 use super::config::ClientConfig;
@@ -55,6 +56,9 @@ pub struct RtmpPublisher {
     config: ClientConfig,
     event_tx: mpsc::Sender<PublishEvent>,
     connector: Option<RtmpConnector>,
+    /// Cached FLV audio format byte derived from the AAC sequence header;
+    /// used by `send_audio(&AacData)` to build tag bodies for raw frames.
+    aac_format_byte: Option<u8>,
 }
 
 impl RtmpPublisher {
@@ -68,6 +72,7 @@ impl RtmpPublisher {
             config,
             event_tx: tx,
             connector: None,
+            aac_format_byte: None,
         };
 
         (publisher, rx)
@@ -75,10 +80,12 @@ impl RtmpPublisher {
 
     /// Connect to the RTMP server and start publishing.
     ///
-    /// After this returns successfully, you can call `send_audio()` to
-    /// send audio frames.
+    /// After this returns successfully, you can call `send_video()` and
+    /// `send_audio()` to send media frames.
     pub async fn connect(&mut self) -> Result<()> {
         let mut connector = RtmpConnector::connect(self.config.clone()).await?;
+        // Reset cached state from any previous session.
+        self.aac_format_byte = None;
         let _ = self.event_tx.send(PublishEvent::Connected).await;
 
         let stream_name = self
@@ -94,45 +101,64 @@ impl RtmpPublisher {
         Ok(())
     }
 
-    /// Send an audio frame.
+    /// Send an audio frame parsed from RTMP data.
     ///
-    /// The `data` should be the complete FLV audio tag body, including any
-    /// codec-specific headers. The caller is responsible for constructing
-    /// the correct payload for their chosen codec.
+    /// `data` is parsed AAC data; its FLV tag body is built internally and
+    /// sent on the published stream. `timestamp` is in milliseconds.
     ///
-    /// `timestamp` is in milliseconds.
+    /// For `AacData::SequenceHeader`, the FLV audio format byte is derived
+    /// from the `AudioSpecificConfig` and cached for subsequent raw frames.
+    /// For `AacData::Frame`, the cached format byte is used; calling this
+    /// with a `Frame` before any `SequenceHeader` returns an error.
     ///
     /// # AAC Example
     ///
-    /// For AAC, the FLV audio tag body is structured as:
-    /// - First byte: audio tag header (`0xAF` = AAC, 44100Hz, stereo, 16-bit)
-    /// - Second byte: AAC packet type (`0x00` = sequence header, `0x01` = raw)
-    /// - Remaining bytes: codec data
-    ///
     /// ```no_run
     /// # use bytes::Bytes;
+    /// # use rtmp_rs::media::{AacData, AudioSpecificConfig};
     /// # async fn example(publisher: &mut rtmp_rs::client::RtmpPublisher) -> rtmp_rs::error::Result<()> {
-    /// // Send AAC sequence header (AudioSpecificConfig)
-    /// let audio_specific_config: &[u8] = &[0x12, 0x10]; // AAC-LC, 44.1kHz, stereo (ISO 14496-3)
-    /// let mut header = vec![0xAF, 0x00]; // FLV audio tag: AAC format, sequence header
-    /// header.extend_from_slice(audio_specific_config);
-    /// publisher.send_audio(Bytes::from(header), 0).await?;
+    /// // Send AAC sequence header (AudioSpecificConfig: AAC-LC, 44.1kHz, stereo)
+    /// let asc = AudioSpecificConfig::parse(Bytes::from_static(&[0x12, 0x10])).unwrap();
+    /// let audio_seq = AacData::SequenceHeader(asc);
+    /// publisher.send_audio(&audio_seq, 0).await?;
     ///
     /// // Send raw AAC frame
-    /// let raw_aac: &[u8] = &[/* raw AAC data */];
-    /// let mut frame = vec![0xAF, 0x01];
-    /// frame.extend_from_slice(raw_aac);
-    /// let timestamp_ms = 1024u32;
-    /// publisher.send_audio(Bytes::from(frame), timestamp_ms).await?;
+    /// let audio_frame = AacData::Frame { data: Bytes::from_static(&[/* raw AAC data */]) };
+    /// publisher.send_audio(&audio_frame, 1024).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn send_audio(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
-        let connector = self.connector.as_mut().ok_or_else(|| {
-            Error::Protocol(crate::error::ProtocolError::UnexpectedMessage(
-                "Not connected".into(),
-            ))
-        })?;
+    pub async fn send_audio(&mut self, data: &AacData, timestamp: u32) -> Result<()> {
+        let connector = self.connector.as_mut().ok_or(Error::ConnectionClosed)?;
+
+        let format_byte = match data {
+            AacData::SequenceHeader(cfg) => cfg.flv_format_byte(),
+            AacData::Frame { .. } => self
+                .aac_format_byte
+                .ok_or(Error::Media(MediaError::MissingSequenceHeader))?,
+        };
+
+        let body = data.to_flv_tag_body(format_byte);
+        connector.send_audio_data(body, timestamp).await?;
+
+        if let AacData::SequenceHeader(_) = data {
+            self.aac_format_byte = Some(format_byte);
+        }
+        Ok(())
+    }
+
+    /// Send a pre-built FLV audio tag body.
+    ///
+    /// `data` should be the complete FLV audio tag body, including the
+    /// format byte and AAC packet type. The caller is responsible for
+    /// constructing the correct payload. `timestamp` is in milliseconds.
+    ///
+    /// This is the low-level counterpart to [`send_audio`](Self::send_audio).
+    /// It does **not** update the cached `aac_format_byte`; mixing
+    /// `send_audio_raw` for a sequence header with `send_audio` for raw
+    /// frames will leave the cache unset and cause `send_audio` to error.
+    pub async fn send_audio_raw(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
+        let connector = self.connector.as_mut().ok_or(Error::ConnectionClosed)?;
 
         connector.send_audio_data(data, timestamp).await
     }
@@ -141,20 +167,48 @@ impl RtmpPublisher {
     ///
     /// `data` is parsed AVC data; its FLV tag body is built internally and
     /// sent on the published stream. `timestamp` is in milliseconds.
+    ///
+    /// # AVC Example
+    ///
+    /// For AVC, the FLV video tag body is structured as:
+    /// - First byte: frame type (4 bits) + codec ID (4 bits, `0x07` = AVC)
+    /// - Second byte: AVC packet type (`0x00` = sequence header, `0x01` = NALU)
+    /// - Bytes 3-5: composition time (SI24, signed)
+    /// - Remaining bytes: codec data
+    ///
+    /// ```no_run
+    /// # use bytes::Bytes;
+    /// # use rtmp_rs::media::h264::{AvcConfig, H264Data};
+    /// # async fn example(publisher: &mut rtmp_rs::client::RtmpPublisher) -> rtmp_rs::error::Result<()> {
+    /// // Send AVC sequence header (AVCDecoderConfigurationRecord)
+    /// let avc_raw = Bytes::from_static(&[
+    ///     0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x1F,
+    ///     0x01, 0x00, 0x03, 0x68, 0xEF, 0x38,
+    /// ]);
+    /// let video_seq = H264Data::SequenceHeader(AvcConfig::parse(avc_raw).unwrap());
+    /// publisher.send_video(&video_seq, 0).await?;
+    ///
+    /// // Send keyframe (IDR)
+    /// let nalus = Bytes::from_static(&[0x00, 0x00, 0x00, 0x05, 0x65, 0x88, 0x84, 0x00, 0x00]);
+    /// let keyframe = H264Data::Frame { keyframe: true, composition_time: 0, nalus };
+    /// publisher.send_video(&keyframe, 33).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_video(&mut self, data: &H264Data, timestamp: u32) -> Result<()> {
-        let body = data.to_flv_tag_body();
-        let connector = self.connector.as_mut().ok_or_else(|| {
-            Error::Protocol(crate::error::ProtocolError::UnexpectedMessage(
-                "Not connected".into(),
-            ))
-        })?;
+        let connector = self.connector.as_mut().ok_or(Error::ConnectionClosed)?;
 
+        let body = data.to_flv_tag_body();
         connector.send_video_data(body, timestamp).await
     }
 
     /// Disconnect from the server.
+    ///
+    /// Resets the cached `aac_format_byte`; after reconnect, a fresh AAC
+    /// sequence header must be sent before raw audio frames.
     pub async fn disconnect(&mut self) {
         self.connector.take();
+        self.aac_format_byte = None;
         let _ = self.event_tx.send(PublishEvent::Disconnected).await;
     }
 

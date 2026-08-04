@@ -187,6 +187,23 @@ impl AudioSpecificConfig {
             1024
         }
     }
+
+    /// Build the FLV audio tag header byte from this config.
+    ///
+    /// Layout: `SoundFormat=10(AAC) | SoundRate | SoundSize=1(16-bit) | SoundType`.
+    /// FLV defines only 4 sample rates (5512/11025/22050/44100 Hz); any other
+    /// frequency falls back to the 44100 slot.
+    pub fn flv_format_byte(&self) -> u8 {
+        let sound_rate = match self.sampling_frequency {
+            5512 => 0,
+            11025 => 1,
+            22050 => 2,
+            44100 => 3,
+            _ => 3,
+        };
+        let sound_type = if self.channel_configuration >= 2 { 1 } else { 0 };
+        (10 << 4) | (sound_rate << 2) | (1 << 1) | sound_type
+    }
 }
 
 /// Parsed AAC data
@@ -228,23 +245,27 @@ impl AacData {
 
     /// Build the FLV audio tag body for this AAC data (transmux, no re-encode).
     ///
-    /// The leading byte is `0xAF` (AAC, 44.1 kHz, 16-bit, stereo) — decoders
-    /// ignore the FLV sound fields for AAC and use `AudioSpecificConfig`.
-    pub fn to_flv_tag_body(&self) -> Bytes {
-        let mut body = BytesMut::new();
+    /// `format_byte` is the FLV audio tag header byte
+    /// (SoundFormat/SoundRate/SoundSize/SoundType), derived from
+    /// [`AudioSpecificConfig::flv_format_byte`] by the caller (typically cached
+    /// on the publisher after the sequence header).
+    pub fn to_flv_tag_body(&self, format_byte: u8) -> Bytes {
         match self {
             AacData::SequenceHeader(cfg) => {
-                body.put_u8(0xAF);
+                let mut body = BytesMut::with_capacity(2 + cfg.raw.len());
+                body.put_u8(format_byte);
                 body.put_u8(0x00); // sequence header
                 body.extend_from_slice(&cfg.raw);
+                body.freeze()
             }
             AacData::Frame { data } => {
-                body.put_u8(0xAF);
+                let mut body = BytesMut::with_capacity(2 + data.len());
+                body.put_u8(format_byte);
                 body.put_u8(0x01); // raw
                 body.extend_from_slice(data);
+                body.freeze()
             }
         }
-        body.freeze()
     }
 }
 
