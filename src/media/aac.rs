@@ -14,7 +14,7 @@
 //! - 0: AAC sequence header (AudioSpecificConfig)
 //! - 1: AAC raw frame data
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{MediaError, Result};
 
@@ -224,6 +224,27 @@ impl AacData {
     /// Check if this is a sequence header
     pub fn is_sequence_header(&self) -> bool {
         matches!(self, AacData::SequenceHeader(_))
+    }
+
+    /// Build the FLV audio tag body for this AAC data (transmux, no re-encode).
+    ///
+    /// The leading byte is `0xAF` (AAC, 44.1 kHz, 16-bit, stereo) — decoders
+    /// ignore the FLV sound fields for AAC and use `AudioSpecificConfig`.
+    pub fn to_flv_tag_body(&self) -> Bytes {
+        let mut body = BytesMut::new();
+        match self {
+            AacData::SequenceHeader(cfg) => {
+                body.put_u8(0xAF);
+                body.put_u8(0x00); // sequence header
+                body.extend_from_slice(&cfg.raw);
+            }
+            AacData::Frame { data } => {
+                body.put_u8(0xAF);
+                body.put_u8(0x01); // raw
+                body.extend_from_slice(data);
+            }
+        }
+        body.freeze()
     }
 }
 
