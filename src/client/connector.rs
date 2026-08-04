@@ -42,6 +42,30 @@ pub struct RtmpConnector {
     enhanced_capabilities: Option<EnhancedCapabilities>,
 }
 
+/// Poll a future once with a no-op waker. Returns `None` when the future is
+/// not ready (i.e. no data available) without blocking.
+fn poll_read_once<F: std::future::Future>(
+    mut fut: std::pin::Pin<&mut F>,
+) -> Option<F::Output> {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    fn raw_waker() -> RawWaker {
+        fn clone(_: *const ()) -> RawWaker {
+            raw_waker()
+        }
+        fn noop(_: *const ()) {}
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    // SAFETY: the vtable is all no-ops; the raw waker is never dereferenced.
+    let waker = unsafe { Waker::from_raw(raw_waker()) };
+    let mut cx = Context::from_waker(&waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
+    }
+}
+
 impl RtmpConnector {
     /// Connect to an RTMP server
     pub async fn connect(config: ClientConfig) -> Result<Self> {
@@ -498,6 +522,10 @@ impl RtmpConnector {
     /// `data` is the FLV audio tag body (header byte + payload).
     /// `timestamp` is in milliseconds.
     pub async fn send_audio_data(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
+        // Consume server control traffic first (non-blocking) so the server's
+        // send buffer never backpressures the push. See `drain_incoming`.
+        self.drain_incoming().await?;
+
         let chunk = RtmpChunk {
             csid: CSID_AUDIO,
             timestamp,
@@ -519,6 +547,10 @@ impl RtmpConnector {
     /// `data` is the FLV video tag body (header byte + payload).
     /// `timestamp` is in milliseconds.
     pub async fn send_video_data(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
+        // Consume server control traffic first (non-blocking) so the server's
+        // send buffer never backpressures the push. See `drain_incoming`.
+        self.drain_incoming().await?;
+
         let chunk = RtmpChunk {
             csid: CSID_VIDEO,
             timestamp,
@@ -563,6 +595,66 @@ impl RtmpConnector {
             self.send_message(&RtmpMessage::Acknowledgement { sequence: received })
                 .await?;
             self.last_ack_sequence = received;
+        }
+        Ok(())
+    }
+
+    /// Drain inbound messages without blocking, handling control messages so a
+    /// push-only client still consumes the server's control traffic. Otherwise
+    /// the server's send buffer fills and backpressures the push.
+    ///
+    /// The socket is polled once with a no-op waker, so when no data is
+    /// available the call returns immediately. A `timeout(Duration::ZERO,
+    /// read)` would cost a full timer tick (~1ms), which at 73 frames/s adds
+    /// ~95ms/s of blocking and makes the push fall behind real time.
+    ///
+    /// Returns `ConnectionClosed` if the peer closed the connection.
+    async fn drain_incoming(&mut self) -> Result<()> {
+        let n = {
+            let mut read = std::pin::pin!(self.reader.read_buf(&mut self.read_buf));
+            match poll_read_once(read.as_mut()) {
+                Some(Ok(n)) => n,
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(()), // no data available
+            }
+        };
+        if n == 0 {
+            return Err(Error::ConnectionClosed);
+        }
+        self.bytes_received = self.bytes_received.wrapping_add(n as u64);
+
+        while let Some(chunk) = self.chunk_decoder.decode(&mut self.read_buf)? {
+            match RtmpMessage::from_chunk(&chunk) {
+                Ok(msg) => self.handle_incoming(msg).await?,
+                Err(e) => tracing::debug!(error = %e, "drain: ignoring unparseable message"),
+            }
+        }
+        self.maybe_send_ack().await
+    }
+
+    /// Handle a control message received while pushing/pulling.
+    async fn handle_incoming(&mut self, msg: RtmpMessage) -> Result<()> {
+        match msg {
+            RtmpMessage::SetChunkSize(size) => {
+                self.chunk_decoder.set_chunk_size(size);
+            }
+            RtmpMessage::WindowAckSize(size) => {
+                self.window_ack_size = size.max(1);
+            }
+            RtmpMessage::SetPeerBandwidth { .. } => {
+                // A bandwidth limit on our output; not enforced (no
+                // sender-side flow control yet) — ignore, like the connect
+                // phase. Echoing a WindowAckSize here would conflate it with
+                // the receive-ack window.
+            }
+            RtmpMessage::UserControl(crate::protocol::message::UserControlEvent::PingRequest(ts)) => {
+                // Reply to pings so servers (e.g. nginx-rtmp) do not drop us.
+                self.send_message(&RtmpMessage::UserControl(
+                    crate::protocol::message::UserControlEvent::PingResponse(ts),
+                ))
+                .await?;
+            }
+            _ => {}
         }
         Ok(())
     }
