@@ -6,6 +6,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
+use crate::media::h264::H264Data;
 
 use super::config::ClientConfig;
 use super::connector::RtmpConnector;
@@ -134,6 +135,21 @@ impl RtmpPublisher {
         })?;
 
         connector.send_audio_data(data, timestamp).await
+    }
+
+    /// Send a video frame parsed from RTMP data.
+    ///
+    /// `data` is parsed AVC data; its FLV tag body is built internally and
+    /// sent on the published stream. `timestamp` is in milliseconds.
+    pub async fn send_video(&mut self, data: &H264Data, timestamp: u32) -> Result<()> {
+        let body = data.to_flv_tag_body();
+        let connector = self.connector.as_mut().ok_or_else(|| {
+            Error::Protocol(crate::error::ProtocolError::UnexpectedMessage(
+                "Not connected".into(),
+            ))
+        })?;
+
+        connector.send_video_data(body, timestamp).await
     }
 
     /// Disconnect from the server.
