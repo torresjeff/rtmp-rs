@@ -617,4 +617,78 @@ mod tests {
         // The raw field should contain the original bytes
         assert_eq!(config.raw.len(), 2);
     }
+
+    #[test]
+    fn test_flv_format_byte() {
+        // 44100 Hz, stereo -> 0xAF (AAC, 44kHz, 16-bit, stereo)
+        let cfg = AudioSpecificConfig {
+            audio_object_type: 2,
+            sampling_frequency_index: 4,
+            sampling_frequency: 44100,
+            channel_configuration: 2,
+            frame_length_flag: false,
+            depends_on_core_coder: false,
+            extension_flag: false,
+            raw: Bytes::new(),
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAF);
+
+        // 22050 Hz, mono -> 0xAA (AAC, 22kHz, 16-bit, mono)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 22050,
+            channel_configuration: 1,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAA);
+
+        // 5512 Hz, mono -> 0xA2 (AAC, 5.5kHz, 16-bit, mono)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 5512,
+            channel_configuration: 1,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xA2);
+
+        // 96000 Hz, stereo -> 0xAF (unlisted rate defaults to 3 = 44kHz slot)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 96000,
+            channel_configuration: 2,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAF);
+    }
+
+    #[test]
+    fn test_aac_to_flv_tag_body_sequence_header() {
+        let raw = Bytes::from_static(&[0x12, 0x10]);
+        let cfg = AudioSpecificConfig {
+            audio_object_type: 2,
+            sampling_frequency_index: 4,
+            sampling_frequency: 44100,
+            channel_configuration: 2,
+            frame_length_flag: false,
+            depends_on_core_coder: false,
+            extension_flag: false,
+            raw: raw.clone(),
+        };
+        let data = AacData::SequenceHeader(cfg);
+        let body = data.to_flv_tag_body(0xAF);
+
+        assert_eq!(body[0], 0xAF); // format byte
+        assert_eq!(body[1], 0x00); // sequence header
+        assert_eq!(&body[2..], &raw[..]);
+    }
+
+    #[test]
+    fn test_aac_to_flv_tag_body_raw_frame() {
+        let payload = Bytes::from_static(&[0x21, 0x00, 0x49, 0x90]);
+        let data = AacData::Frame {
+            data: payload.clone(),
+        };
+        let body = data.to_flv_tag_body(0xAF);
+
+        assert_eq!(body[0], 0xAF); // format byte
+        assert_eq!(body[1], 0x01); // raw
+        assert_eq!(&body[2..], &payload[..]);
+    }
 }
