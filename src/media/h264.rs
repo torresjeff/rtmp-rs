@@ -23,7 +23,7 @@
 //! | numOfPPS (1) | { ppsLength (2) | ppsNALUnit }*
 //! ```
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{MediaError, Result};
 
@@ -308,6 +308,40 @@ impl H264Data {
     /// Check if this is a sequence header
     pub fn is_sequence_header(&self) -> bool {
         matches!(self, H264Data::SequenceHeader(_))
+    }
+
+    /// Build the FLV video tag body for this AVC data (transmux, no re-encode).
+    pub fn to_flv_tag_body(&self) -> Bytes {
+        let mut body = BytesMut::new();
+        match self {
+            H264Data::SequenceHeader(cfg) => {
+                body.put_u8(0x17); // keyframe, AVC
+                body.put_u8(0x00); // sequence header
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+                body.put_u8(0x00); // composition time = 0
+                body.extend_from_slice(&cfg.raw);
+            }
+            H264Data::Frame {
+                keyframe,
+                composition_time,
+                nalus,
+            } => {
+                body.put_u8(if *keyframe { 0x17 } else { 0x27 });
+                body.put_u8(0x01); // NALU
+                let ct = (*composition_time as u32).to_be_bytes();
+                body.extend_from_slice(&ct[1..]); // SI24 (signed)
+                body.extend_from_slice(nalus);
+            }
+            H264Data::EndOfSequence => {
+                body.put_u8(0x17);
+                body.put_u8(0x02); // end of sequence
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+            }
+        }
+        body.freeze()
     }
 }
 
