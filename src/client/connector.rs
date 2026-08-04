@@ -502,6 +502,27 @@ impl RtmpConnector {
         Ok(())
     }
 
+    /// Send video data on the published stream.
+    ///
+    /// `data` is the FLV video tag body (header byte + payload).
+    /// `timestamp` is in milliseconds.
+    pub async fn send_video_data(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
+        let chunk = RtmpChunk {
+            csid: CSID_VIDEO,
+            timestamp,
+            message_type: crate::protocol::constants::MSG_VIDEO,
+            stream_id: self.stream_id,
+            payload: data,
+        };
+
+        self.write_buf.clear();
+        self.chunk_encoder.encode(&chunk, &mut self.write_buf);
+        self.writer.write_all(&self.write_buf).await?;
+        self.writer.flush().await?;
+
+        Ok(())
+    }
+
     /// Read the next RTMP message
     pub async fn read_message(&mut self) -> Result<RtmpMessage> {
         loop {
@@ -531,11 +552,16 @@ impl RtmpConnector {
             _ => CSID_COMMAND,
         };
 
+        let stream_id = match msg {
+            RtmpMessage::Command(cmd) | RtmpMessage::CommandAmf3(cmd) => cmd.stream_id,
+            _ => 0,
+        };
+
         let chunk = RtmpChunk {
             csid,
             timestamp: 0,
             message_type: msg_type,
-            stream_id: 0,
+            stream_id,
             payload,
         };
 
