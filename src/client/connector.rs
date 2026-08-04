@@ -32,6 +32,12 @@ pub struct RtmpConnector {
     chunk_decoder: ChunkDecoder,
     chunk_encoder: ChunkEncoder,
     stream_id: u32,
+    /// Total bytes received from the peer, for flow-control acknowledgement.
+    bytes_received: u64,
+    /// Server's advertised window ack size (default 2.5MB, FMS/librtmp default).
+    window_ack_size: u32,
+    /// Sequence value of the last Acknowledgement sent.
+    last_ack_sequence: u32,
     /// Negotiated E-RTMP capabilities (if E-RTMP is active)
     enhanced_capabilities: Option<EnhancedCapabilities>,
 }
@@ -82,6 +88,9 @@ impl RtmpConnector {
             chunk_decoder: ChunkDecoder::new(),
             chunk_encoder: ChunkEncoder::new(),
             stream_id: 0,
+            bytes_received: 0,
+            window_ack_size: 2_500_000,
+            last_ack_sequence: 0,
             enhanced_capabilities: None,
         };
 
@@ -221,8 +230,11 @@ impl RtmpConnector {
                 RtmpMessage::SetChunkSize(size) => {
                     self.chunk_decoder.set_chunk_size(size);
                 }
-                RtmpMessage::WindowAckSize(_) | RtmpMessage::SetPeerBandwidth { .. } => {
-                    // Ignore these during connect
+                RtmpMessage::WindowAckSize(size) => {
+                    self.window_ack_size = size.max(1);
+                }
+                RtmpMessage::SetPeerBandwidth { .. } => {
+                    // Ignore during connect
                 }
                 _ => {}
             }
@@ -536,7 +548,23 @@ impl RtmpConnector {
             if n == 0 {
                 return Err(Error::ConnectionClosed);
             }
+            self.bytes_received = self.bytes_received.wrapping_add(n as u64);
+            self.maybe_send_ack().await?;
         }
+    }
+
+    /// Send an Acknowledgement once we have received half the window since the
+    /// last one (half-window, like FFmpeg/SRS; earlier than the peer's full
+    /// window so the sender never pauses waiting for our ACK).
+    async fn maybe_send_ack(&mut self) -> Result<()> {
+        let received = self.bytes_received as u32;
+        let delta = received.wrapping_sub(self.last_ack_sequence);
+        if delta >= self.window_ack_size / 2 {
+            self.send_message(&RtmpMessage::Acknowledgement { sequence: received })
+                .await?;
+            self.last_ack_sequence = received;
+        }
+        Ok(())
     }
 
     /// Send an RTMP message
@@ -547,6 +575,7 @@ impl RtmpConnector {
             RtmpMessage::SetChunkSize(_)
             | RtmpMessage::WindowAckSize(_)
             | RtmpMessage::SetPeerBandwidth { .. }
+            | RtmpMessage::Acknowledgement { .. }
             | RtmpMessage::UserControl(_) => CSID_PROTOCOL_CONTROL,
             RtmpMessage::Command(_) | RtmpMessage::CommandAmf3(_) => CSID_COMMAND,
             _ => CSID_COMMAND,
