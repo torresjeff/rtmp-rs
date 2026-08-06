@@ -373,6 +373,16 @@ impl ChunkEncoder {
         self.chunk_size
     }
 
+    /// Reset per-chunk-stream state (keeps the negotiated chunk size).
+    ///
+    /// Call when a session/stream ends so a reused encoder does not carry
+    /// stale timestamp/format state into a new session (a second publish on
+    /// the same connection would otherwise regress timestamps and hit the
+    /// fmt 0 issue in `select_format`).
+    pub fn reset(&mut self) {
+        self.streams.clear();
+    }
+
     /// Encode a message into chunks
     pub fn encode(&mut self, chunk: &RtmpChunk, buf: &mut BytesMut) {
         let csid = chunk.csid;

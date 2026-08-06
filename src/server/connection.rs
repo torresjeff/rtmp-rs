@@ -402,6 +402,11 @@ impl<H: RtmpHandler> Connection<H> {
             self.is_paused = false;
         }
 
+        // Drop per-chunk-stream state so a reused connection does not carry
+        // stale timestamps into the next session (regression would otherwise
+        // break the fmt 0 handling in select_format).
+        self.chunk_encoder.reset();
+
         if let Some(stream_id) = self.playback_stream_id {
             // Send StreamEOF
             self.send_user_control(UserControlEvent::StreamEof(stream_id))
