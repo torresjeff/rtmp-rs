@@ -230,7 +230,12 @@ impl AvcConfig {
 
 impl H264Data {
     /// Parse from RTMP video data (after frame type and codec ID bytes)
-    pub fn parse(mut data: Bytes) -> Result<Self> {
+    ///
+    /// `nalu_length_size` is the NALU length prefix size (1, 2, or 4 bytes) from
+    /// the stream's most recent [`AvcConfig::nalu_length_size`]. It is only used
+    /// for [`AvcPacketType::Nalu`] packets; pass 4 if no sequence header has been
+    /// seen yet.
+    pub fn parse(mut data: Bytes, nalu_length_size: u8) -> Result<Self> {
         if data.len() < 4 {
             return Err(MediaError::InvalidAvcPacket.into());
         }
@@ -256,7 +261,7 @@ impl H264Data {
             }
             Some(AvcPacketType::Nalu) => {
                 // Check for IDR in the NAL units
-                let keyframe = Self::contains_idr(&data);
+                let keyframe = Self::contains_idr(&data, nalu_length_size);
                 Ok(H264Data::Frame {
                     keyframe,
                     composition_time,
@@ -269,31 +274,9 @@ impl H264Data {
     }
 
     /// Check if NAL units contain an IDR frame
-    fn contains_idr(data: &Bytes) -> bool {
-        let mut offset = 0;
-        while offset + 4 < data.len() {
-            // Read NALU length (assume 4 bytes, most common)
-            let len = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            if offset >= data.len() {
-                break;
-            }
-
-            // Check NAL unit type
-            let nalu_type = NaluType::from_byte(data[offset]);
-            if nalu_type == Some(NaluType::Idr) {
-                return true;
-            }
-
-            offset += len;
-        }
-        false
+    fn contains_idr(data: &[u8], nalu_length_size: u8) -> bool {
+        NaluIterator::new(data, nalu_length_size)
+            .any(|nalu| nalu.first().and_then(|b| NaluType::from_byte(*b)) == Some(NaluType::Idr))
     }
 
     /// Check if this is a keyframe
@@ -332,7 +315,7 @@ impl<'a> Iterator for NaluIterator<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.offset + self.nalu_length_size > self.data.len() {
+        if self.nalu_length_size == 0 || self.offset + self.nalu_length_size > self.data.len() {
             return None;
         }
 
@@ -461,7 +444,7 @@ mod tests {
             0x00, 0x03, 0x68, 0xEF, 0x38, // PPS
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         assert!(h264.is_sequence_header());
         assert!(h264.is_keyframe());
 
@@ -479,7 +462,7 @@ mod tests {
             0x00, 0x00, 0x00, // composition time
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         assert!(matches!(h264, H264Data::EndOfSequence));
         assert!(!h264.is_keyframe());
         assert!(!h264.is_sequence_header());
@@ -496,7 +479,7 @@ mod tests {
             0x65, 0x88, 0x84, 0x00, 0x00, // IDR NALU (type 5)
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         assert!(h264.is_keyframe());
         assert!(!h264.is_sequence_header());
 
@@ -514,6 +497,37 @@ mod tests {
     }
 
     #[test]
+    fn test_h264_data_nalu_keyframe_2byte_length() {
+        // Two NALUs with 2-byte length prefixes: SEI then IDR. A 4-byte reader
+        // would misparse this and miss the IDR.
+        let data = Bytes::from_static(&[
+            0x01, // AVC NALU
+            0x00, 0x00, 0x00, // composition time
+            0x00, 0x03, // length = 3
+            0x06, 0x05, 0x80, // SEI NALU (type 6)
+            0x00, 0x02, // length = 2
+            0x65, 0x88, // IDR NALU (type 5)
+        ]);
+
+        assert!(H264Data::parse(data.clone(), 2).unwrap().is_keyframe());
+        assert!(!H264Data::parse(data, 4).unwrap().is_keyframe());
+    }
+
+    #[test]
+    fn test_h264_data_nalu_keyframe_1byte_length() {
+        let data = Bytes::from_static(&[
+            0x01, // AVC NALU
+            0x00, 0x00, 0x00, // composition time
+            0x02, // length = 2
+            0x41, 0x9A, // Non-IDR slice
+            0x02, // length = 2
+            0x65, 0x88, // IDR NALU
+        ]);
+
+        assert!(H264Data::parse(data, 1).unwrap().is_keyframe());
+    }
+
+    #[test]
     fn test_h264_data_nalu_p_frame() {
         // Create NALU data with non-IDR slice
         let data = Bytes::from_static(&[
@@ -524,7 +538,7 @@ mod tests {
             0x41, 0x9A, 0x00, 0x00, 0x00, // Non-IDR slice (type 1)
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         assert!(!h264.is_keyframe());
 
         if let H264Data::Frame { keyframe, .. } = h264 {
@@ -541,7 +555,7 @@ mod tests {
             0x41, // Non-IDR
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         if let H264Data::Frame {
             composition_time, ..
         } = h264
@@ -560,7 +574,7 @@ mod tests {
             0x41, // Non-IDR
         ]);
 
-        let h264 = H264Data::parse(data).unwrap();
+        let h264 = H264Data::parse(data, 4).unwrap();
         if let H264Data::Frame {
             composition_time, ..
         } = h264
@@ -576,14 +590,14 @@ mod tests {
             0x00, 0x00, 0x00,
         ]);
 
-        let result = H264Data::parse(data);
+        let result = H264Data::parse(data, 4);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_h264_data_too_short() {
         let data = Bytes::from_static(&[0x00, 0x00]); // Less than 4 bytes
-        let result = H264Data::parse(data);
+        let result = H264Data::parse(data, 4);
         assert!(result.is_err());
     }
 

@@ -88,11 +88,14 @@ impl RtmpPuller {
         // Start playing
         connector.play(&stream_name).await?;
 
+        // NALU length prefix size from the last AVC sequence header (4 until one is seen)
+        let mut nalu_length_size: u8 = 4;
+
         // Read messages
         loop {
             match connector.read_message().await {
                 Ok(msg) => {
-                    if !self.handle_message(msg, &tx).await {
+                    if !self.handle_message(msg, &tx, &mut nalu_length_size).await {
                         break;
                     }
                 }
@@ -108,7 +111,12 @@ impl RtmpPuller {
     }
 
     /// Handle a received message
-    async fn handle_message(&self, msg: RtmpMessage, tx: &mpsc::Sender<ClientEvent>) -> bool {
+    async fn handle_message(
+        &self,
+        msg: RtmpMessage,
+        tx: &mpsc::Sender<ClientEvent>,
+        nalu_length_size: &mut u8,
+    ) -> bool {
         match msg {
             RtmpMessage::Video { timestamp, data } => {
                 // Send raw tag
@@ -117,7 +125,10 @@ impl RtmpPuller {
 
                 // Parse and send frame
                 if data.len() >= 2 && (data[0] & 0x0F) == 7 {
-                    if let Ok(h264) = H264Data::parse(data.slice(1..)) {
+                    if let Ok(h264) = H264Data::parse(data.slice(1..), *nalu_length_size) {
+                        if let H264Data::SequenceHeader(ref config) = h264 {
+                            *nalu_length_size = config.nalu_length_size;
+                        }
                         let _ = tx
                             .send(ClientEvent::VideoFrame {
                                 timestamp,

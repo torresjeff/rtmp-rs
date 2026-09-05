@@ -1520,6 +1520,7 @@ impl<H: RtmpHandler> Connection<H> {
 
         // Create stream context for callbacks
         let stream_key = stream.stream_key.clone().unwrap_or_default();
+        let nalu_length_size = stream.video_nalu_length_size;
         let stream_ctx = StreamContext::new(self.context.clone(), stream_id, stream_key, true);
 
         // Notify keyframe
@@ -1547,7 +1548,12 @@ impl<H: RtmpHandler> Connection<H> {
                 }
             } else if data.len() >= 2 && (data[0] & 0x0F) == 7 {
                 // Legacy AVC/H.264
-                if let Ok(h264_data) = H264Data::parse(data.slice(1..)) {
+                if let Ok(h264_data) = H264Data::parse(data.slice(1..), nalu_length_size) {
+                    if let H264Data::SequenceHeader(ref config) = h264_data {
+                        if let Some(stream) = self.state.get_stream_mut(stream_id) {
+                            stream.video_nalu_length_size = config.nalu_length_size;
+                        }
+                    }
                     self.handler
                         .on_video_frame(&stream_ctx, &h264_data, timestamp)
                         .await;

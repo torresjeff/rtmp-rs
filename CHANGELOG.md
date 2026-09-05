@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-05
+
+### Added
+
+- **RTMP publish client** - `RtmpPublisher` for pushing a stream to a remote server.
+  - `RtmpPublisher::new(config)` returns the publisher and a `PublishEvent` receiver (`Connected`, `Publishing`, `Error`, `Disconnected`)
+  - `connect()`, `send_audio(data, timestamp)`, `disconnect()`, `is_connected()`
+  - `send_audio` is codec-agnostic: it takes the full FLV audio tag body (tag header byte + codec payload); AAC usage is shown in the doc comments
+  - `RtmpConnector::publish(stream_name)` and `RtmpConnector::send_audio_data(data, timestamp)` for lower-level use
+- **RTMPS (TLS) support** via the optional `tls` cargo feature (`tokio-rustls`, `rustls` with the `ring` provider, `webpki-roots`).
+  - `rtmps://` URLs are accepted by `ClientConfig::parse_url`; `ParsedUrl` gains a `tls: bool` field
+  - New `client::stream::RtmpStream` enum wrapping plain TCP and TLS streams
+  - Server certificates are verified against the Mozilla root store; the `ring` `CryptoProvider` is installed automatically
+- `ChunkEncoder::reset()` - clears per-chunk-stream state while keeping the negotiated chunk size
+
+### Changed
+
+- **Breaking**: `H264Data::parse` now takes the NALU length prefix size (`nalu_length_size`) as a second argument. Keyframe detection previously assumed 4-byte length prefixes; it now honours the `lengthSizeMinusOne` field from the stream's AVCDecoderConfigurationRecord. Pass `4` if no sequence header has been seen yet.
+
+### Fixed
+
+- Server resets chunk encoder state when a stream ends, so a second publish on the same connection no longer inherits stale timestamps and format state from the previous session
+- Failing doc-test in `RtmpPublisher::send_audio`
+
 ## [0.5.0] - 2026-01-27
 
 ### Added

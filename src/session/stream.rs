@@ -65,6 +65,9 @@ pub struct StreamState {
 
     /// GOP buffer for late-joiner support
     pub gop_buffer: GopBuffer,
+
+    /// NALU length prefix size from the last AVC sequence header (4 until one is seen)
+    pub video_nalu_length_size: u8,
 }
 
 impl StreamState {
@@ -86,6 +89,7 @@ impl StreamState {
             keyframes: 0,
             bytes_received: 0,
             gop_buffer: GopBuffer::new(),
+            video_nalu_length_size: 4,
         }
     }
 
