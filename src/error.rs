@@ -25,6 +25,8 @@ pub enum Error {
     Timeout,
     /// Connection was closed
     ConnectionClosed,
+    /// Endpoint buffer is full (non-fatal; caller may drop frame or retry)
+    BufferFull,
     /// Invalid configuration
     Config(String),
 }
@@ -40,6 +42,7 @@ impl fmt::Display for Error {
             Error::Rejected(msg) => write!(f, "Connection rejected: {}", msg),
             Error::Timeout => write!(f, "Operation timed out"),
             Error::ConnectionClosed => write!(f, "Connection closed"),
+            Error::BufferFull => write!(f, "Endpoint buffer full"),
             Error::Config(msg) => write!(f, "Configuration error: {}", msg),
         }
     }

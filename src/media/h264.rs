@@ -23,7 +23,7 @@
 //! | numOfPPS (1) | { ppsLength (2) | ppsNALUnit }*
 //! ```
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{MediaError, Result};
 
@@ -308,6 +308,46 @@ impl H264Data {
     /// Check if this is a sequence header
     pub fn is_sequence_header(&self) -> bool {
         matches!(self, H264Data::SequenceHeader(_))
+    }
+
+    /// Build the FLV video tag body for this AVC data (transmux, no re-encode).
+    pub fn to_flv_tag_body(&self) -> Bytes {
+        match self {
+            H264Data::SequenceHeader(cfg) => {
+                let mut body = BytesMut::with_capacity(5 + cfg.raw.len());
+                body.put_u8(0x17); // keyframe, AVC
+                body.put_u8(0x00); // sequence header
+                body.put_u8(0x00); // composition time = 0 (SI24)
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+                body.extend_from_slice(&cfg.raw);
+                body.freeze()
+            }
+            H264Data::Frame {
+                keyframe,
+                composition_time,
+                nalus,
+            } => {
+                let mut body = BytesMut::with_capacity(5 + nalus.len());
+                body.put_u8(if *keyframe { 0x17 } else { 0x27 });
+                body.put_u8(0x01); // NALU
+                let ct = *composition_time;
+                body.put_u8(((ct >> 16) & 0xFF) as u8); // SI24 (signed)
+                body.put_u8(((ct >> 8) & 0xFF) as u8);
+                body.put_u8((ct & 0xFF) as u8);
+                body.extend_from_slice(nalus);
+                body.freeze()
+            }
+            H264Data::EndOfSequence => {
+                let mut body = BytesMut::with_capacity(5);
+                body.put_u8(0x17);
+                body.put_u8(0x02); // end of sequence
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+                body.put_u8(0x00);
+                body.freeze()
+            }
+        }
     }
 }
 
@@ -712,5 +752,69 @@ mod tests {
 
         let mut iter = NaluIterator::new(data, 4);
         assert!(iter.next().is_none()); // Should return None for truncated data
+    }
+
+    #[test]
+    fn test_h264_to_flv_tag_body_sequence_header() {
+        let raw = Bytes::from_static(&[0x01, 0x64, 0x00, 0x1F, 0xFF]);
+        let cfg = AvcConfig {
+            profile: 100,
+            compatibility: 0,
+            level: 31,
+            nalu_length_size: 4,
+            sps: vec![],
+            pps: vec![],
+            raw: raw.clone(),
+        };
+        let data = H264Data::SequenceHeader(cfg);
+        let body = data.to_flv_tag_body();
+
+        assert_eq!(body[0], 0x17); // keyframe, AVC
+        assert_eq!(body[1], 0x00); // sequence header
+        assert_eq!(&body[2..5], &[0x00, 0x00, 0x00]); // composition time = 0
+        assert_eq!(&body[5..], &raw[..]);
+    }
+
+    #[test]
+    fn test_h264_to_flv_tag_body_keyframe() {
+        let nalus = Bytes::from_static(&[0x65, 0x88, 0x84, 0x00, 0x00]);
+        let data = H264Data::Frame {
+            keyframe: true,
+            composition_time: 0,
+            nalus: nalus.clone(),
+        };
+        let body = data.to_flv_tag_body();
+
+        assert_eq!(body[0], 0x17); // keyframe, AVC
+        assert_eq!(body[1], 0x01); // NALU
+        assert_eq!(&body[2..5], &[0x00, 0x00, 0x00]); // ct = 0
+        assert_eq!(&body[5..], &nalus[..]);
+    }
+
+    #[test]
+    fn test_h264_to_flv_tag_body_p_frame() {
+        let nalus = Bytes::from_static(&[0x41, 0x9A, 0x00]);
+        let data = H264Data::Frame {
+            keyframe: false,
+            composition_time: 256,
+            nalus: nalus.clone(),
+        };
+        let body = data.to_flv_tag_body();
+
+        assert_eq!(body[0], 0x27); // inter-frame, AVC
+        assert_eq!(body[1], 0x01); // NALU
+        assert_eq!(&body[2..5], &[0x00, 0x01, 0x00]); // ct = 256
+        assert_eq!(&body[5..], &nalus[..]);
+    }
+
+    #[test]
+    fn test_h264_to_flv_tag_body_end_of_sequence() {
+        let data = H264Data::EndOfSequence;
+        let body = data.to_flv_tag_body();
+
+        assert_eq!(body[0], 0x17); // keyframe, AVC
+        assert_eq!(body[1], 0x02); // end of sequence
+        assert_eq!(&body[2..5], &[0x00, 0x00, 0x00]); // ct = 0
+        assert_eq!(body.len(), 5);
     }
 }

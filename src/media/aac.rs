@@ -14,7 +14,7 @@
 //! - 0: AAC sequence header (AudioSpecificConfig)
 //! - 1: AAC raw frame data
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{MediaError, Result};
 
@@ -187,6 +187,23 @@ impl AudioSpecificConfig {
             1024
         }
     }
+
+    /// Build the FLV audio tag header byte from this config.
+    ///
+    /// Layout: `SoundFormat=10(AAC) | SoundRate | SoundSize=1(16-bit) | SoundType`.
+    /// FLV defines only 4 sample rates (5512/11025/22050/44100 Hz); any other
+    /// frequency falls back to the 44100 slot.
+    pub fn flv_format_byte(&self) -> u8 {
+        let sound_rate = match self.sampling_frequency {
+            5512 => 0,
+            11025 => 1,
+            22050 => 2,
+            44100 => 3,
+            _ => 3,
+        };
+        let sound_type = if self.channel_configuration >= 2 { 1 } else { 0 };
+        (10 << 4) | (sound_rate << 2) | (1 << 1) | sound_type
+    }
 }
 
 /// Parsed AAC data
@@ -224,6 +241,31 @@ impl AacData {
     /// Check if this is a sequence header
     pub fn is_sequence_header(&self) -> bool {
         matches!(self, AacData::SequenceHeader(_))
+    }
+
+    /// Build the FLV audio tag body for this AAC data (transmux, no re-encode).
+    ///
+    /// `format_byte` is the FLV audio tag header byte
+    /// (SoundFormat/SoundRate/SoundSize/SoundType), derived from
+    /// [`AudioSpecificConfig::flv_format_byte`] by the caller (typically cached
+    /// on the publisher after the sequence header).
+    pub fn to_flv_tag_body(&self, format_byte: u8) -> Bytes {
+        match self {
+            AacData::SequenceHeader(cfg) => {
+                let mut body = BytesMut::with_capacity(2 + cfg.raw.len());
+                body.put_u8(format_byte);
+                body.put_u8(0x00); // sequence header
+                body.extend_from_slice(&cfg.raw);
+                body.freeze()
+            }
+            AacData::Frame { data } => {
+                let mut body = BytesMut::with_capacity(2 + data.len());
+                body.put_u8(format_byte);
+                body.put_u8(0x01); // raw
+                body.extend_from_slice(data);
+                body.freeze()
+            }
+        }
     }
 }
 
@@ -574,5 +616,79 @@ mod tests {
 
         // The raw field should contain the original bytes
         assert_eq!(config.raw.len(), 2);
+    }
+
+    #[test]
+    fn test_flv_format_byte() {
+        // 44100 Hz, stereo -> 0xAF (AAC, 44kHz, 16-bit, stereo)
+        let cfg = AudioSpecificConfig {
+            audio_object_type: 2,
+            sampling_frequency_index: 4,
+            sampling_frequency: 44100,
+            channel_configuration: 2,
+            frame_length_flag: false,
+            depends_on_core_coder: false,
+            extension_flag: false,
+            raw: Bytes::new(),
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAF);
+
+        // 22050 Hz, mono -> 0xAA (AAC, 22kHz, 16-bit, mono)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 22050,
+            channel_configuration: 1,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAA);
+
+        // 5512 Hz, mono -> 0xA2 (AAC, 5.5kHz, 16-bit, mono)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 5512,
+            channel_configuration: 1,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xA2);
+
+        // 96000 Hz, stereo -> 0xAF (unlisted rate defaults to 3 = 44kHz slot)
+        let cfg = AudioSpecificConfig {
+            sampling_frequency: 96000,
+            channel_configuration: 2,
+            ..cfg
+        };
+        assert_eq!(cfg.flv_format_byte(), 0xAF);
+    }
+
+    #[test]
+    fn test_aac_to_flv_tag_body_sequence_header() {
+        let raw = Bytes::from_static(&[0x12, 0x10]);
+        let cfg = AudioSpecificConfig {
+            audio_object_type: 2,
+            sampling_frequency_index: 4,
+            sampling_frequency: 44100,
+            channel_configuration: 2,
+            frame_length_flag: false,
+            depends_on_core_coder: false,
+            extension_flag: false,
+            raw: raw.clone(),
+        };
+        let data = AacData::SequenceHeader(cfg);
+        let body = data.to_flv_tag_body(0xAF);
+
+        assert_eq!(body[0], 0xAF); // format byte
+        assert_eq!(body[1], 0x00); // sequence header
+        assert_eq!(&body[2..], &raw[..]);
+    }
+
+    #[test]
+    fn test_aac_to_flv_tag_body_raw_frame() {
+        let payload = Bytes::from_static(&[0x21, 0x00, 0x49, 0x90]);
+        let data = AacData::Frame {
+            data: payload.clone(),
+        };
+        let body = data.to_flv_tag_body(0xAF);
+
+        assert_eq!(body[0], 0xAF); // format byte
+        assert_eq!(body[1], 0x01); // raw
+        assert_eq!(&body[2..], &payload[..]);
     }
 }

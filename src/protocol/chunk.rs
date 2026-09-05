@@ -482,6 +482,14 @@ fn select_format(chunk: &RtmpChunk, state: &ChunkStreamState) -> u8 {
         return 0;
     }
 
+    // Timestamp regression: force format 0 (absolute timestamp) so the peer
+    // resynchronizes instead of applying a wrapped 32-bit delta. Otherwise a
+    // regression becomes a ~4G delta that gets truncated by write_u24, which
+    // downstream can misinterpret as an extended-timestamp marker.
+    if chunk.timestamp < state.timestamp {
+        return 0;
+    }
+
     // If message type or length differs, use format 1
     if chunk.message_type != state.message_type
         || chunk.payload.len() as u32 != state.message_length
@@ -624,6 +632,32 @@ mod tests {
 
         assert_eq!(encoder.chunk_size(), 4096);
         assert_eq!(decoder.chunk_size(), 4096);
+    }
+
+    #[test]
+    fn test_encode_timestamp_regression_forces_fmt0() {
+        let mut encoder = ChunkEncoder::new();
+        let mut decoder = ChunkDecoder::new();
+        let mut encoded = BytesMut::new();
+
+        let mk = |timestamp: u32, payload: &'static [u8]| RtmpChunk {
+            csid: CSID_VIDEO,
+            timestamp,
+            message_type: MSG_VIDEO,
+            stream_id: 1,
+            payload: Bytes::from_static(payload),
+        };
+
+        // First message at ts=1000 (fmt 0, absolute).
+        encoder.encode(&mk(1000, b"frame-a"), &mut encoded);
+        let d1 = decoder.decode(&mut encoded).unwrap().unwrap();
+        assert_eq!(d1.timestamp, 1000);
+
+        // Regression to ts=0: must be encoded as fmt 0 (absolute), so the
+        // decoder reconstructs 0 instead of 1000 + wrapped(0 - 1000) ≈ 2^32.
+        encoder.encode(&mk(0, b"frame-b"), &mut encoded);
+        let d2 = decoder.decode(&mut encoded).unwrap().unwrap();
+        assert_eq!(d2.timestamp, 0);
     }
 
     #[test]
