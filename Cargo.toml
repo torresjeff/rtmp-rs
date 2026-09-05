@@ -3,11 +3,12 @@ name = "rtmp-rs"
 version = "0.6.0"
 edition = "2021"
 authors = ["Jeff Torres"]
-description = "RTMP client/server library"
+description = "Async RTMP and RTMPS server and client for Rust, built on Tokio. Enhanced RTMP with HEVC, AV1, Opus and FLAC, GOP caching, stream key pub/sub."
 license = "MIT"
 repository = "https://github.com/torresjeff/rtmp-rs"
-keywords = ["rtmp", "streaming", "video", "live"]
-categories = ["multimedia::video", "network-programming"]
+readme = "README.md"
+keywords = ["rtmp", "rtmps", "streaming", "video", "tokio"]
+categories = ["multimedia::video", "multimedia::audio", "network-programming", "asynchronous"]
 exclude = [
     "assets/*",
 ]
