@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `connect()`, `send_audio(data, timestamp)`, `disconnect()`, `is_connected()`
   - `send_audio` is codec-agnostic: it takes the full FLV audio tag body (tag header byte + codec payload); AAC usage is shown in the doc comments
   - `RtmpConnector::publish(stream_name)` and `RtmpConnector::send_audio_data(data, timestamp)` for lower-level use
-- **RTMPS (TLS) support** via the optional `tls` cargo feature (`tokio-rustls`, `rustls` with the `ring` provider, `webpki-roots`).
+- **RTMPS (TLS) support** via the optional `tls` cargo feature (`tokio-rustls`, `rustls` with the `ring` provider, `webpki-roots` 1.0).
   - `rtmps://` URLs are accepted by `ClientConfig::parse_url`; `ParsedUrl` gains a `tls: bool` field
   - New `client::stream::RtmpStream` enum wrapping plain TCP and TLS streams
   - Server certificates are verified against the Mozilla root store; the `ring` `CryptoProvider` is installed automatically
