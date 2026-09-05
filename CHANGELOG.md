@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `rtmps://` URLs are accepted by `ClientConfig::parse_url`; `ParsedUrl` gains a `tls: bool` field
   - New `client::stream::RtmpStream` enum wrapping plain TCP and TLS streams
   - Server certificates are verified against the Mozilla root store; the `ring` `CryptoProvider` is installed automatically
+  - `ClientConfig::tls_root_certs` / `ClientConfig::tls_root_cert(cert)` add extra trusted roots (private CA, self-signed) on top of the built-in store
+  - Integration test `tests/rtmps.rs` (requires `--features tls`) exercises RTMPS end to end through an in-process TLS terminator
 - `ChunkEncoder::reset()` - clears per-chunk-stream state while keeping the negotiated chunk size
 
 ### Changed

@@ -57,7 +57,7 @@ impl RtmpConnector {
         let stream = if parsed_url.tls {
             #[cfg(feature = "tls")]
             {
-                let tls_stream = Self::wrap_tls(socket, &parsed_url.host).await?;
+                let tls_stream = Self::wrap_tls(socket, &parsed_url.host, &config).await?;
                 RtmpStream::Tls(tls_stream)
             }
             #[cfg(not(feature = "tls"))]
@@ -96,6 +96,7 @@ impl RtmpConnector {
     async fn wrap_tls(
         socket: TcpStream,
         host: &str,
+        config: &ClientConfig,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
         use std::sync::Arc;
         use tokio_rustls::TlsConnector;
@@ -106,6 +107,11 @@ impl RtmpConnector {
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for cert in &config.tls_root_certs {
+            root_store
+                .add(cert.clone())
+                .map_err(|e| Error::Config(format!("Invalid TLS root certificate: {}", e)))?;
+        }
 
         let tls_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)

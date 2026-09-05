@@ -37,6 +37,14 @@ pub struct ClientConfig {
 
     /// Enhanced RTMP client capabilities to advertise
     pub enhanced_capabilities: EnhancedClientCapabilities,
+
+    /// Additional trusted root certificates (DER) for RTMPS connections.
+    ///
+    /// These are added on top of the built-in Mozilla root store, so a
+    /// private CA or self-signed server certificate can be trusted without
+    /// disabling verification for public hosts.
+    #[cfg(feature = "tls")]
+    pub tls_root_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
 }
 
 /// Client-side Enhanced RTMP capabilities.
@@ -167,6 +175,8 @@ impl Default for ClientConfig {
             buffer_length: 1000,
             enhanced_rtmp: EnhancedRtmpMode::Auto,
             enhanced_capabilities: EnhancedClientCapabilities::default(),
+            #[cfg(feature = "tls")]
+            tls_root_certs: Vec::new(),
         }
     }
 }
@@ -193,6 +203,16 @@ impl ClientConfig {
     /// Set Enhanced RTMP client capabilities.
     pub fn enhanced_capabilities(mut self, caps: EnhancedClientCapabilities) -> Self {
         self.enhanced_capabilities = caps;
+        self
+    }
+
+    /// Add a trusted root certificate (DER) for RTMPS connections.
+    ///
+    /// Added on top of the built-in Mozilla root store. Use this to trust a
+    /// private CA or a self-signed certificate on a server you control.
+    #[cfg(feature = "tls")]
+    pub fn tls_root_cert(mut self, cert: rustls::pki_types::CertificateDer<'static>) -> Self {
+        self.tls_root_certs.push(cert);
         self
     }
 
